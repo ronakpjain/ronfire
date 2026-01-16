@@ -52,7 +52,9 @@ impl AsyncLogger {
 ///
 /// # Returns
 ///
-/// Returns a `Result` containing a bound `UnixListener` on success, or a `std::io::Error` on failure.
+/// Returns a `Result` containing a bound `UnixListener` on success,
+/// or a `std::io::Error` on failure.
+
 pub fn create_socket(socket_path: String) -> std::io::Result<UnixListener> {
     if std::path::Path::new(&socket_path).exists() {
         let _ = std::fs::remove_file(&socket_path);
@@ -64,17 +66,20 @@ pub fn create_socket(socket_path: String) -> std::io::Result<UnixListener> {
 
 // Parses a raw HTTP request string and extracts the target file path.
 ///
-/// This function supports only `GET` requests with HTTP/1.0 or HTTP/1.1. It trims the leading `/`
-/// and resolves the file path. If the path is empty, it defaults to `"index.html"`
+/// This function supports only `GET` requests with HTTP/1.0 or HTTP/1.1.
+/// It trims the leading `/` and resolves the file path.
+/// If the path is empty, it defaults to `"index.html"`
 ///
 /// # Arguments
 ///
 /// * `request` - A string slice representing the raw HTTP request.
-/// * `logger` - An optional reference to an `AsyncLogger` for logging errors and warnings.
+/// * `logger` - An optional reference to an `AsyncLogger`
+///   for logging errors and warnings.
 ///
 /// # Returns
 ///
-/// Returns `Some(String)` with the resolved file path if the request is valid and supported, or `None` otherwise.
+/// Returns `Some(String)` with the resolved file path if the request
+/// is valid and supported, or `None` otherwise.
 
 pub async fn parse_request(
     request: &str,
@@ -146,12 +151,14 @@ pub async fn parse_request(
 ///
 /// # Arguments
 ///
-/// * `path` - A normalized URL path without a leading slash (e.g., `about`, `blog/`, `css/main.css`).
+/// * `path` - A normalized URL path without a leading slash
+///   (e.g., `about`, `blog/`, `css/main.css`).
 ///
 /// # Returns
 ///
 /// * `Some(String)` if a valid file is found.
 /// * `None` if no matching file exists.
+
 fn resolve_path(path: &str) -> Option<String> {
     let base = PathBuf::from(".");
 
@@ -176,6 +183,7 @@ fn resolve_path(path: &str) -> Option<String> {
 
     None
 }
+
 /// Generates a complete HTTP response based on the contents of a file.
 ///
 /// If the file exists and can be read, it returns a `200 OK` response with the file contents.
@@ -187,7 +195,9 @@ fn resolve_path(path: &str) -> Option<String> {
 ///
 /// # Returns
 ///
-/// A complete HTTP response as a `String`, including status line, headers, and body.
+/// A complete HTTP response as a tuple of (`String`, `String`, `Vec<8>`),
+/// including status line, headers, and body.
+
 pub fn generate_response(full_path: &str) -> (String, String, Vec<u8>) {
     match fs::read(full_path) {
         Ok(contents) => {
@@ -241,6 +251,7 @@ pub fn generate_response(full_path: &str) -> (String, String, Vec<u8>) {
 /// let mime = guess_mime_type("unknownfile.xyz");
 /// assert_eq!(mime, "application/octet-stream");
 /// ```
+
 fn guess_mime_type(path: &str) -> &'static str {
     match Path::new(path).extension().and_then(|s| s.to_str()) {
         Some("html") => "text/html",
@@ -279,6 +290,7 @@ fn guess_mime_type(path: &str) -> &'static str {
 /// * `socket` - The UnixStream to send the response through.
 /// * `response_parts` - A tuple containing the status line (String),
 ///   headers (String), and body (`Vec<u8>`).
+
 pub async fn send_response(
     socket: &mut UnixStream,
     response_parts: (String, String, Vec<u8>),
@@ -317,10 +329,14 @@ pub async fn send_response(
 
 /// Reads data from the provided UnixStream socket asynchronously.
 ///
-/// Returns a tuple containing the request as a String and the socket itself.
+/// # Arguments
 ///
-/// # Errors
-/// Returns an error if reading from the socket fails.
+/// * `socket` - The UnixStream to read from
+///
+/// # Returns
+///
+/// A Result containing a `String` containing the request or an `Error`
+
 pub async fn read_socket(
     socket: &mut UnixStream,
 ) -> Result<String, std::io::Error> {
