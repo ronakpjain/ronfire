@@ -104,6 +104,7 @@ pub async fn parse_request(
         }
 
         if method == "GET" {
+            let path = path.split('?').next().unwrap_or("");
             let path = path.trim_start_matches('/');
 
             if path.split('/').any(|part| part == "..") {
