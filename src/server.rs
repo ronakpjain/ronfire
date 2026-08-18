@@ -1,4 +1,9 @@
-//! Server composition: CLI, configuration, static files, plugins, and transport.
+//! Server composition: startup configuration, routing, and connection tasks.
+//!
+//! [`run`] builds the compiled plugin registry once, loads route instances,
+//! establishes one secure document root, and accepts Unix-socket connections.
+//! Each task reuses immutable routes and a shared cache while framing and
+//! finalizing requests through the lower-level modules.
 
 use tokio::io::BufReader;
 use tokio::net::UnixStream;

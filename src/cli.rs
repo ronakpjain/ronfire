@@ -1,4 +1,9 @@
 //! Command-line argument parsing for the ronfire server.
+//!
+//! The parser keeps the positional Unix-socket argument for compatibility and
+//! handles the explicit `--config` and `--root` paths used by [`crate::server`].
+//! It performs syntax validation only; filesystem policy is applied during
+//! startup.
 
 use std::path::PathBuf;
 

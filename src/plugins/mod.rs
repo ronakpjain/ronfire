@@ -1,4 +1,10 @@
-//! Compiled plugin registry, configuration, dispatch, and cache.
+//! Compiled plugin registry, configuration parsing, dispatch, and cache.
+//!
+//! Implementations are trusted Rust modules under `src/plugins`. This module
+//! owns the object-safe [`PluginFactory`] and [`PluginHandler`] seam, builds a
+//! fixed route table at startup, and performs exact path lookup. Configuration
+//! selects only factories already registered in the binary; it cannot load
+//! code or reload routes.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
@@ -22,7 +28,11 @@ use crate::http::{HttpRequest, HttpResponse, RequestRange, finalize_response};
 pub struct ConfigError(String);
 
 impl ConfigError {
-    fn new(message: impl Into<String>) -> Self {
+    /// Creates a configuration error with a caller-provided explanation.
+    ///
+    /// Factories should use this additive API to report invalid instance names
+    /// or fields; the registry adds section and line context while parsing.
+    pub fn new(message: impl Into<String>) -> Self {
         Self(message.into())
     }
 
@@ -45,10 +55,15 @@ pub type DispatchFuture = Pin<Box<dyn Future<Output = HttpResponse> + Send>>;
 /// semantics so plugins do not need to reparse the wire protocol.
 #[derive(Clone, Debug)]
 pub struct PluginRequest {
+    /// The request method. The core server normally dispatches only `GET` and `HEAD`.
     pub method: String,
+    /// The original origin-form target, including its query string.
     pub target: String,
+    /// The query-free path used for exact route selection.
     pub path: String,
+    /// Parsed request headers, retaining repeated names and their values.
     pub headers: Vec<(String, String)>,
+    /// The parsed single-range state to be applied during finalization.
     pub range: RequestRange,
 }
 
@@ -56,7 +71,16 @@ pub struct PluginRequest {
 /// The object-safe boxed future keeps core request parsing independent of
 /// plugin implementations.
 pub trait PluginHandler: Send + Sync {
+    /// Returns the one absolute path owned by this configured instance.
+    ///
+    /// The registry rejects duplicate paths, and core dispatch compares this
+    /// value exactly after removing only the request query from the path.
     fn route(&self) -> &str;
+    /// Handles one already-parsed request and returns a buffered response.
+    ///
+    /// Implementations are trusted in-process code: the future must be
+    /// `Send`, and the handler must be safe to share across connection tasks.
+    /// [`dispatch_request`] applies range and `HEAD` finalization afterward.
     fn dispatch(
         &self,
         request: PluginRequest,
@@ -66,6 +90,11 @@ pub trait PluginHandler: Send + Sync {
 
 /// Builds configured plugin instances from section fields.
 pub trait PluginFactory: Send + Sync {
+    /// Builds one configured handler from an instance name and its fields.
+    ///
+    /// Factories own validation, dependency setup, and the returned handler's
+    /// state. Returning [`ConfigError`] aborts startup; configuration cannot
+    /// load code or create a factory that was not registered at compile time.
     fn build(
         &self,
         instance: &str,
@@ -129,6 +158,10 @@ struct RawSection {
 /// Compiled route instances produced by the registry. Core dispatch only
 /// performs exact route lookup and delegates to the owning plugin object.
 /// Parsed and compiled plugin route instances.
+///
+/// A clone shares immutable handler ownership through `Arc`; it does not
+/// reload the configuration. Route lookup is exact and performed in this
+/// prebuilt vector, while each handler owns its plugin-specific behavior.
 #[derive(Clone, Default)]
 pub struct RouteConfig {
     routes: Vec<RegisteredRoute>,
@@ -381,6 +414,10 @@ pub(crate) fn validate_header_value(value: &str) -> Result<(), String> {
 
 /// Concurrency-safe in-memory cache storing successful plugin bodies and
 /// retaining expired entries for stale-on-upstream-error responses.
+///
+/// The cache is shared by cloned server connection state. It is an optional
+/// service passed to every plugin; handlers remain responsible for choosing
+/// keys, TTLs, and whether stale data is safe to return.
 #[derive(Clone, Default)]
 pub struct TtlCache {
     #[cfg(feature = "proxy")]

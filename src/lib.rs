@@ -1,7 +1,23 @@
-//! Public module and compatibility facade for ronfire.
+#![warn(missing_docs)]
+
+//! A small, Unix-socket HTTP server with secure static files and compiled-in plugins.
 //!
-//! The implementation is organized by ownership while these re-exports keep
-//! the historical root-level request, static-file, plugin, and transport APIs.
+//! A request enters through [`http`], which strictly parses and frames one
+//! HTTP/1.0 or HTTP/1.1 request. [`server`] then checks the exact-route
+//! [`plugins`] registry before resolving a path beneath [`static_files::DocumentRoot`].
+//! [`http::finalize_response`] applies range and `HEAD` semantics, and
+//! [`transport`] writes the buffered response and serializes request logging.
+//!
+//! Plugin implementations live separately under `src/plugins`; configuration
+//! can only instantiate plugins that were compiled and registered in the
+//! binary. The public [`plugins`] traits are the extension seam. See the
+//! [plugin guide](https://github.com/ronakpjain/ronfire/blob/master/docs/plugins.md)
+//! for the trusted plugin model and a fork-based implementation walkthrough.
+//!
+//! The modules are also available directly: [`cli`] parses process arguments,
+//! [`http`] owns protocol parsing, [`plugins`] owns registry/configuration and
+//! dispatch, [`server`] composes the runtime, [`static_files`] owns document
+//! root security, and [`transport`] owns Unix-socket I/O.
 
 pub mod cli;
 pub mod http;

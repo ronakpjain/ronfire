@@ -4,6 +4,32 @@
 friendly routes remain local, while optional compiled-in plugins can own
 additional route behavior.
 
+## Architecture and source layout
+
+Requests are strictly parsed and framed in `src/http.rs`, dispatched by exact
+path through the compiled registry in `src/plugins`, then resolved beneath the
+secure document root in `src/static_files.rs` when no plugin owns the route.
+Responses are finalized for ranges/HEAD and written by `src/transport.rs`; the
+runtime composition and configuration startup live in `src/server.rs`, with
+CLI parsing in `src/cli.rs`.
+
+```text
+src/lib.rs                 crate docs and compatibility re-exports
+src/http.rs                HTTP parsing, framing, ranges, finalization
+src/server.rs              startup and connection-task composition
+src/static_files.rs        document-root containment and static responses
+src/transport.rs           Unix socket writes and logging
+src/plugins/mod.rs         registry, config parser, dispatch, cache
+src/plugins/proxy.rs       feature-gated fixed-target proxy
+```
+
+Plugin implementations live separately under `src/plugins`. Configuration only
+enables already-compiled and registered plugins; it cannot dynamically load
+code or reload configuration. Plugins are trusted, unsandboxed in-process Rust
+code and their responses are buffered. To implement one, **fork ronfire** and
+register your fork's implementation. See the concise overview below and the
+[compiled plugin guide](docs/plugins.md) for the complete walkthrough.
+
 ## Run
 
 ```bash
@@ -61,7 +87,11 @@ localhost {
 Plugins are compiled into the binary and registered by name. Core request
 parsing and static serving only perform exact route lookup, then delegate to an
 object-safe plugin handler, so adding a plugin does not require changing those
-parts of the server. The default build includes the `proxy` plugin.
+parts of the server. The default build includes the `proxy` plugin. Users who
+need another plugin must **fork ronfire** to add its implementation under
+`src/plugins`, feature gate it, and register its factory; a config section alone
+cannot add executable behavior. See [docs/plugins.md](docs/plugins.md) for
+lifecycle, security boundaries, and a practical fork walkthrough.
 
 `ronfire.conf` uses strict INI-like sections. Each section is
 `[plugin.NAME.INSTANCE]`, followed by `key = value` fields. Blank lines and

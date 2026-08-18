@@ -1,4 +1,9 @@
-//! Unix-socket transport and serialized logging helpers.
+//! Unix-domain-socket transport and serialized logging helpers.
+//!
+//! The server uses a local Unix listener rather than exposing a TCP port.
+//! Responses are written in status/header/body order, and [`AsyncLogger`]
+//! serializes diagnostics from concurrent connection tasks without creating a
+//! public log file.
 
 use std::fs;
 use std::path::Path;

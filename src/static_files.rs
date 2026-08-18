@@ -1,4 +1,9 @@
-//! Secure document-root resolution and static response generation.
+//! Secure document-root resolution and buffered static response generation.
+//!
+//! [`DocumentRoot`] canonicalizes one configured directory and checks every
+//! candidate after resolution, preventing symlink escapes and denying dot
+//! metadata, logs, and the active configuration. Friendly extension and index
+//! fallbacks are applied only inside that canonical root.
 
 use std::fs;
 use std::path::{Path, PathBuf};

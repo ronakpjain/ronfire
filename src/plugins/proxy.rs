@@ -1,4 +1,10 @@
 //! Feature-gated fixed-target HTTP proxy plugin.
+//!
+//! Each configured instance owns a validated upstream URL and a redirect
+//! allowlist. Native reqwest/rustls fetches successful bodies incrementally
+//! under timeout and size limits; the plugin never accepts a destination URL
+//! from a request. Core response finalization supplies range and `HEAD`
+//! behavior after the proxy returns its buffered body.
 
 use super::{
     ConfigError, DispatchFuture, HttpResponse, PluginFactory, PluginHandler,
@@ -38,9 +44,13 @@ pub struct ProxyConfig {
 /// Upstream timeout, size, status, or transport failures.
 #[derive(Debug)]
 pub enum ProxyError {
+    /// The complete upstream operation exceeded its configured timeout.
     Timeout,
+    /// Incremental body reading crossed the configured byte limit.
     Oversize,
+    /// Reqwest could not send the request or read its response.
     Request(reqwest::Error),
+    /// The upstream completed with a non-success HTTP status.
     Status(StatusCode),
 }
 
@@ -69,6 +79,11 @@ pub type FetchFuture =
 /// Abstracts upstream fetching so proxy boundaries can be tested without
 /// public network access.
 pub trait ProxyFetcher: Send + Sync {
+    /// Fetches one fixed URL with a body limit and operation timeout.
+    ///
+    /// Implementations must enforce `max_bytes` while consuming the response,
+    /// rather than reading an unbounded body first. This seam is public so
+    /// tests and specialized in-process fetchers can avoid a real network.
     fn fetch(
         &self,
         url: &str,
@@ -205,7 +220,9 @@ impl PluginFactory for ProxyFactory {
 }
 
 /// A configured proxy plugin handler with its own redirect policy.
-/// A configured proxy plugin handler with its own redirect policy.
+///
+/// The handler retains its fixed upstream URL and never uses request data as a
+/// destination. It is constructed by [`ProxyFactory`] and shared across tasks.
 pub struct ProxyPlugin {
     config: Arc<ProxyConfig>,
     fetcher: Arc<dyn ProxyFetcher>,

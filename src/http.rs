@@ -1,11 +1,21 @@
-//! HTTP request parsing, framing, range handling, and response finalization.
+//! Strict HTTP/1.x parsing, request framing, range handling, and finalization.
+//!
+//! This module is the trust boundary for wire input. It accepts only origin
+//! form HTTP/1.0 and HTTP/1.1 requests, bounds header reads, rejects request
+//! bodies and ambiguous transfer framing, and preserves buffered bytes for
+//! pipelining. Handlers return buffered responses that are finalized here for
+//! one byte range and `HEAD` semantics.
 
 use std::fmt;
 use std::time::Duration;
 
 use tokio::io::{AsyncBufRead, AsyncReadExt};
 
-/// Complete HTTP response parts: status line, headers, and body.
+/// Complete buffered HTTP response parts: status line, headers, and body.
+///
+/// The tuple contains a status line ending in `CRLF`, a header block ending in
+/// `CRLFCRLF`, and the body bytes. Plugin and static handlers return this shape;
+/// the server finalizes range and `HEAD` behavior before sending it.
 pub type HttpResponse = (String, String, Vec<u8>);
 
 /// A parsed request line and header block.
@@ -69,8 +79,11 @@ impl HttpRequest {
 /// from no Range header so callers can return HTTP 416 correctly.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RequestRange {
+    /// No `Range` header was supplied.
     None,
+    /// One syntactically valid byte range was supplied.
     Single(ByteRangeSpec),
+    /// The header was malformed, contained multiple ranges, or was unsatisfiable.
     Invalid,
 }
 
@@ -86,8 +99,11 @@ pub struct ByteRangeSpec {
 /// Errors produced while reading or parsing a bounded request header block.
 #[derive(Debug)]
 pub enum RequestReadError {
+    /// The underlying asynchronous reader failed.
     Io(std::io::Error),
+    /// The request exceeded [`MAX_REQUEST_HEADER_BYTES`].
     HeaderTooLarge,
+    /// The request bytes violated the supported HTTP grammar.
     Malformed(String),
 }
 
@@ -257,7 +273,10 @@ fn is_header_token(value: &str) -> bool {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-/// Indicates that a Range header is not a single valid byte range.
+/// Indicates that a `Range` header is not one valid byte range.
+///
+/// This zero-sized error intentionally does not expose parser internals;
+/// callers generally use it only to select an HTTP 416 response.
 pub struct RangeParseError;
 
 /// Parses a single `bytes=start-end`, `bytes=start-`, or suffix range.
