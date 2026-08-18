@@ -51,7 +51,7 @@ that root, and share the Unix socket with the edge proxy:
 ```yaml
 services:
   ronfire:
-    image: ironic06/ronfire:0.2.0
+    image: ironic06/ronfire:0.3.0
     command:
       - /run/ronfire/ronfire.sock
       - --root
