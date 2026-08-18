@@ -11,8 +11,7 @@ RUN rustup target add x86_64-unknown-linux-musl && \
 FROM alpine:latest
 WORKDIR /app
 
-# Copy statically built binary
+# rustls uses reqwest's bundled webpki roots; no external fetch utility is required.
 COPY --from=builder /build/target/x86_64-unknown-linux-musl/release/ronfire /usr/local/bin/ronfire
 
-# Set default command, but allow socket path override
 ENTRYPOINT ["ronfire"]

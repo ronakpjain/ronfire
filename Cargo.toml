@@ -1,7 +1,12 @@
 [package]
 name = "ronfire"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
+
+[features]
+default = ["proxy"]
+proxy = ["dep:reqwest"]
 
 [dependencies]
 tokio = { version = "1.45.1", features = ["full"] }
+reqwest = { version = "0.12", optional = true, default-features = false, features = ["rustls-tls-webpki-roots"] }
