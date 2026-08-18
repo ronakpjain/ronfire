@@ -1,90 +1,137 @@
 # ronfire
 
-`ronfire` is a minimal asynchronous static file server built using Rust and Tokio, communicating over a Unix domain socket. It serves files from a local `static/` directory using a simplified HTTP protocol.
+`ronfire` is a small Tokio HTTP server over a Unix domain socket. Static and
+friendly routes remain local, while optional compiled-in plugins can own
+additional route behavior.
 
-## Features
-
-- Asynchronous I/O via `tokio`
-- Uses a Unix domain socket (not TCP)
-- Serves static files (HTML) from a `static/` directory
-- Basic `GET` request parsing
-- Returns `404 Not Found` for missing files
-- `Mime-Type` guessing
-- Sanitizes path traversal attempts
-
-## Requirements
-
-- Rust (edition 2021)
-- Unix-like OS (Linux/macOS)
-- Tokio runtime (`[dependencies] tokio = { version = "1", features = ["full"] }`)
-
-## Setup
-
-### 1. Create a `static/` directory
-
-```bash
-mkdir static
-echo "<h1>Hello, world!</h1>" > static/index.html
-````
-
-### 2. Build and run the server
+## Run
 
 ```bash
 cargo run -- /tmp/ronfire.sock
+cargo run -- /tmp/ronfire.sock --config ./ronfire.conf
 ```
 
-This will:
+The positional socket argument remains compatible and defaults to
+`/tmp/ronfire.sock`. The default configuration is `ronfire.conf`; its absence
+is allowed. A path supplied explicitly with `--config` must exist and be
+readable. `--config PATH` and `--config=PATH` are accepted.
 
-* Remove any existing socket file at `/tmp/ronfire.sock`
-* Start listening for HTTP-like requests over the socket
+### Docker Compose
 
-### 3. Test the server
+The image intentionally contains the ronfire binary only. Mount website
+content read-only as the document root, keep the private configuration outside
+that root, and share the Unix socket with the edge proxy:
 
-Use `curl` or similar tools:
+```yaml
+services:
+  ronfire:
+    image: ironic06/ronfire:0.2.0
+    command:
+      - /run/ronfire/ronfire.sock
+      - --root
+      - /app
+      - --config
+      - /etc/ronfire/ronfire.conf
+    volumes:
+      - ./website:/app:ro
+      - ./ronfire.conf:/etc/ronfire/ronfire.conf:ro
+      - ronfire-socket:/run/ronfire
 
-```bash
-curl --unix-socket /tmp/ronfire.sock http://localhost/
+  edge:
+    image: caddy:alpine
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ronfire-socket:/run/ronfire
+
+volumes:
+  ronfire-socket:
 ```
 
-Expected output:
+The mounted `Caddyfile` uses the same socket path inside the shared volume:
 
-```html
-<h1>Hello, world!</h1>
+```caddyfile
+localhost {
+    reverse_proxy unix//run/ronfire/ronfire.sock
+    tls internal
+}
 ```
 
-## Example Request / Response
+## Compiled plugins and configuration
 
-### Request
+Plugins are compiled into the binary and registered by name. Core request
+parsing and static serving only perform exact route lookup, then delegate to an
+object-safe plugin handler, so adding a plugin does not require changing those
+parts of the server. The default build includes the `proxy` plugin.
 
-```
-GET /index.html HTTP/1.1
-Host: localhost
-```
+`ronfire.conf` uses strict INI-like sections. Each section is
+`[plugin.NAME.INSTANCE]`, followed by `key = value` fields. Blank lines and
+whole-line `#` or `;` comments are allowed. The built-in proxy fields are
+`route`, `url`, `content_type`, optional `content_disposition`, optional
+`redirect_hosts`, `cache_seconds`, `timeout_seconds`, and `max_bytes`:
 
-### Response
-
-```
-HTTP/1.1 200 OK
-Content-Length: 27
-Content-Type: text/html
-
-<h1>Hello, world!</h1>
-```
-
-If the file is missing:
-
-```
-HTTP/1.1 404 Not Found
-Content-Length: 22
-Content-Type: text/html
-
-<h1>404 Not Found</h1>
+```ini
+# Generic fixed-target endpoint; this is not application-specific.
+[plugin.proxy.report]
+route = /api/report
+url = https://api.example.test/report
+content_type = application/json
+content_disposition =
+redirect_hosts = api.example.test
+cache_seconds = 30
+timeout_seconds = 10
+max_bytes = 1048576
 ```
 
-## Caveats
+Unknown plugins or fields, malformed sections/values, duplicate plugin
+instances, and duplicate routes fail startup with line-numbered errors. Proxy
+routes match the configured path exactly (the request query is not part of the
+match), and the upstream URL is always the configured fixed URL. A request can
+never supply or override a destination URL. Route paths must be safe absolute
+URL paths; targets must be valid `http` or `https` URLs without userinfo;
+integer limits are validated; and response header values reject control
+characters including CR/LF.
 
-* Only handles basic `GET` requests.
+The proxy uses native Rust reqwest with rustls, follows redirects through a
+finite policy restricted to the original host by default (use
+`redirect_hosts = github.com, release-assets.githubusercontent.com` when
+needed), requires a successful upstream status, applies a timeout, and
+reads `Response::chunk` incrementally so `max_bytes` is enforced without an
+unbounded body read. Timeout failures produce 504; failed status, transport,
+and oversized responses produce 502. Successful bodies use the configured
+Content-Type and optional Content-Disposition with an exact Content-Length.
+An in-memory concurrency-safe TTL cache is keyed by route. Expired entries are
+retained and served when a subsequent upstream request fails.
 
-## License
+## Features, TLS, and container runtime
 
-MIT
+Cargo's default features include `proxy`. To build the static/core server
+without the proxy dependency, use `cargo build --no-default-features`; proxy
+configuration will then be rejected as an unknown plugin. The `proxy` feature
+owns the optional reqwest dependency, with default reqwest features disabled
+and only rustls TLS plus its bundled `webpki-roots` enabled. Consequently the
+Alpine image needs no external fetch utility or system CA package for the
+bundled roots. Deployments that intentionally switch to native certificate
+roots should add `ca-certificates` to the runtime image.
+
+## Static files and security
+
+`--root PATH` selects one explicit document root and defaults to `.` for
+backward compatibility. Friendly paths resolve only inside that root:
+`/` maps to `index.html`, and extensionless paths use `name.html` or
+`name/index.html`. A dedicated root such as `--root ./static` is recommended
+for deployments. Canonicalization prevents symlink escapes, the active config
+file and `app.log` are denied, and dot/VCS metadata paths are rejected. Only
+GET and HEAD on HTTP/1.0 or HTTP/1.1 are accepted, traversal components are
+rejected, and the server listens on a Unix socket; Caddy or another local
+reverse proxy can provide edge TLS.
+
+Static and proxy success responses advertise `Accept-Ranges: bytes` and
+support one byte range. Valid ranges return 206; malformed or unsatisfiable
+ranges return 416 with `Content-Range: bytes */LENGTH`. HEAD returns the same
+headers as GET without a body. PDFs are served as `application/pdf`.
+
+HTTP headers are buffered per connection up to 16 KiB, with a finite idle read
+timeout. Extra bytes are retained for pipelined requests. GET and HEAD bodies
+and transfer encoding are rejected; malformed, timed-out, and oversized
+headers produce 400, 408, and 431 responses respectively. Request logging goes
+to stderr for container logging and does not create a public log file.
