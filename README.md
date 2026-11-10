@@ -1,6 +1,8 @@
 # ronfire
 
-C++ implementation of `ronfire`. No third-party deps in the server (C++20 + POSIX only).
+A fast Unix-socket HTTP server with static files and compiled-in plugins.
+No third-party deps in the server beyond the system OpenSSL for proxy TLS
+(C++20 + POSIX only).
 
 ```bash
 cmake -S . -B build
@@ -25,7 +27,7 @@ Layout: `src/main.cpp`, `src/runtime/` (coroutine event loop), `src/cli.*`,
   paths and file responses are cached (invalidated by mtime+size).
 - Plugins: compiled-in only, strict `[plugin.NAME.INSTANCE]` INI. `proxy`
   (see below) is the only built-in.
-- Runtime: single-threaded `poll()` loop + C++20 coroutines (`src/runtime/`).
+- Runtime: single-threaded `poll()` loop + coroutines (`src/runtime/`).
   DNS and file reads are briefly synchronous; everything else is async.
 
 ## Proxy
@@ -35,9 +37,8 @@ Fixed-target `http` upstreams only: `route`, `url`, `content_type`,
 Timeouts → `504`, status/transport/oversize → `502`, fresh cache avoids
 fetches, stale bodies serve when upstream fails.
 
-`https://` URLs validate at startup but fail as `502` at fetch time: this
-dependency-free build bundles no TLS. Add a TLS backend to `fetch()` in
-`src/plugins/proxy.cpp` to support them.
+`https://` upstreams work via a system OpenSSL TLS client (see
+`src/plugins/proxy.cpp`).
 
 ## Docker
 
