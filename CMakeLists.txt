@@ -13,6 +13,9 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
   add_compile_options(-Wall -Wextra -Wpedantic -Werror)
 endif()
 
+find_package(Threads REQUIRED)
+find_package(OpenSSL REQUIRED)
+
 add_library(ronfire_lib STATIC
   src/cli.cpp
   src/http.cpp
@@ -31,22 +34,24 @@ add_executable(ronfire src/main.cpp)
 target_link_libraries(ronfire PRIVATE ronfire_lib)
 
 enable_testing()
-find_package(GTest REQUIRED)
-find_package(OpenSSL REQUIRED)
-find_package(Threads REQUIRED)
-add_executable(ronfire_tests
-  tests/test_runtime.cpp
-  tests/test_cli.cpp
-  tests/test_http.cpp
-  tests/test_static.cpp
-  tests/test_transport.cpp
-  tests/test_plugins.cpp
-  tests/test_proxy.cpp
-  tests/test_util.h)
-target_link_libraries(ronfire_tests PRIVATE ronfire_lib GTest::gtest GTest::gtest_main)
-include(GoogleTest)
-gtest_discover_tests(ronfire_tests)
-add_test(NAME ronfire_smoke
-         COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/smoke.sh
-                 $<TARGET_FILE:ronfire>)
-set_tests_properties(ronfire_smoke PROPERTIES TIMEOUT 30)
+find_package(GTest QUIET)
+if(GTest_FOUND)
+  add_executable(ronfire_tests
+    tests/test_runtime.cpp
+    tests/test_cli.cpp
+    tests/test_http.cpp
+    tests/test_static.cpp
+    tests/test_transport.cpp
+    tests/test_plugins.cpp
+    tests/test_proxy.cpp
+    tests/test_util.h)
+  target_link_libraries(ronfire_tests PRIVATE ronfire_lib GTest::gtest GTest::gtest_main)
+  include(GoogleTest)
+  gtest_discover_tests(ronfire_tests)
+  add_test(NAME ronfire_smoke
+           COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/smoke.sh
+                   $<TARGET_FILE:ronfire>)
+  set_tests_properties(ronfire_smoke PROPERTIES TIMEOUT 30)
+else()
+  message(STATUS "GTest not found; tests disabled.")
+endif()
