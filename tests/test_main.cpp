@@ -693,19 +693,6 @@ TEST(Proxy, LoopbackFetchCacheAndErrors) {
   };
   EXPECT_TRUE(block_on(missing_scenario()));
 
-  // HTTPS maps to 502 without any network attempt.
-  auto https_scenario = [&]() -> Task<bool> {
-    auto routes = LoadProxyConfig("https://127.0.0.1/item", "0");
-    ronfire::TtlCache cache;
-    auto response = co_await ronfire::dispatch_request(
-        routes, parse_http_request("GET /api/item HTTP/1.1\r\n\r\n").value(),
-        cache);
-    co_return response.has_value() &&
-              response->status.rfind("HTTP/1.1 502", 0) == 0 &&
-              std::string(response->body.begin(), response->body.end())
-                      .find("require TLS") != std::string::npos;
-  };
-  EXPECT_TRUE(block_on(https_scenario()));
 }
 
 TEST(Proxy, RedirectFollowsAllowlistedHost) {

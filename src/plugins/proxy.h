@@ -43,10 +43,9 @@ struct ProxyError {
 };
 
 /**
- * @brief Fetches one fixed HTTP URL (follows allowed redirects).
+ * @brief Fetches one fixed HTTP(S) URL (follows allowed redirects).
  *
- * HTTPS upstreams are rejected as Request errors: this build contains no
- * TLS implementation, so plain HTTP is the only transport it can fetch.
+ * HTTPS uses a system OpenSSL TLS client (SNI + certificate verification).
  */
 runtime::Task<runtime::Expected<std::vector<std::uint8_t>, ProxyError>>
 fetch(const std::string& url,

@@ -1,5 +1,9 @@
 /** @file plugins/proxy.cpp @brief Proxy plugin implementation. */
 
+#include <openssl/err.h>
+#include <openssl/ssl.h>
+#include <openssl/x509.h>
+
 #include "plugins/proxy.h"
 
 #include <arpa/inet.h>
@@ -247,16 +251,126 @@ struct FetchResult {
 };
 
 /**
- * @brief Buffered fetch reader with a single deadline.
+ * @brief TLS channel over a connected TCP fd (OpenSSL).
+ */
+struct TlsChannel {
+  int fd = -1;
+  SSL_CTX* ctx = nullptr;
+  SSL* ssl = nullptr;
+  ~TlsChannel() {
+    if (ssl != nullptr) {
+      SSL_shutdown(ssl);
+      SSL_free(ssl);
+    }
+    if (ctx != nullptr) {
+      SSL_CTX_free(ctx);
+    }
+    if (fd >= 0) {
+      ::close(fd);
+    }
+  }
+  TlsChannel() = default;
+  TlsChannel(const TlsChannel&) = delete;
+  TlsChannel& operator=(const TlsChannel&) = delete;
+  TlsChannel(TlsChannel&& other) noexcept
+      : fd(std::exchange(other.fd, -1)),
+        ctx(std::exchange(other.ctx, nullptr)),
+        ssl(std::exchange(other.ssl, nullptr)) {}
+};
+
+/**
+ * @brief Runs the TLS handshake (SNI + verification) under a deadline.
+ * @param fd Connected fd.
+ * @param parts Host for SNI/verification.
+ * @param deadline Fetch deadline.
+ * @return The channel, or the proxy error.
+ */
+runtime::Task<runtime::Expected<std::shared_ptr<TlsChannel>, ProxyError>>
+OpenTlsChannel(int fd, const UrlParts& parts, runtime::TimePoint deadline) {
+  using Result = runtime::Expected<std::shared_ptr<TlsChannel>, ProxyError>;
+  auto channel = std::make_shared<TlsChannel>();
+  channel->ctx = SSL_CTX_new(TLS_client_method());
+  if (channel->ctx == nullptr) {
+    channel->fd = -1;
+    co_return Result::fail(RequestFailed("TLS context setup failed"));
+  }
+  SSL_CTX_set_verify(channel->ctx, SSL_VERIFY_PEER, nullptr);
+  if (SSL_CTX_set_default_verify_paths(channel->ctx) != 1) {
+    channel->fd = -1;
+    co_return Result::fail(RequestFailed("TLS trust store setup failed"));
+  }
+  channel->ssl = SSL_new(channel->ctx);
+  if (channel->ssl == nullptr) {
+    channel->fd = -1;
+    co_return Result::fail(RequestFailed("TLS session setup failed"));
+  }
+  SSL_set_fd(channel->ssl, fd);
+  SSL_set_tlsext_host_name(channel->ssl, parts.host.c_str());
+  for (;;) {
+    const int rc = SSL_connect(channel->ssl);
+    if (rc == 1) {
+      break;
+    }
+    const int err = SSL_get_error(channel->ssl, rc);
+    if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
+      const bool timed_out = co_await runtime::ReadyAwaitable{
+          fd, static_cast<short>(err == SSL_ERROR_WANT_READ ? POLLIN : POLLOUT), deadline};
+      if (timed_out) {
+        ProxyError error;
+        error.kind = ProxyError::Kind::Timeout;
+        channel->fd = -1;
+        co_return Result::fail(error);
+      }
+      continue;
+    }
+    channel->fd = -1;
+    co_return Result::fail(RequestFailed("TLS handshake failed"));
+  }
+  if (SSL_get_verify_result(channel->ssl) != X509_V_OK) {
+    channel->fd = -1;
+  co_return Result::fail(RequestFailed("TLS certificate verification failed"));
+  }
+  channel->fd = fd;
+  co_return Result::ok(channel);
+}
+
+/**
+ * @brief Buffered fetch reader with a single deadline (fd or TLS).
  */
 struct FetchReader {
   int fd;
   runtime::TimePoint deadline;
   std::string buffer;
+  std::shared_ptr<TlsChannel> tls;  // empty for plain HTTP
 
   /** @brief Reads more bytes; nullopt on EOF, error on failure/timeout. */
   runtime::Task<runtime::Expected<bool, ProxyError>> fill() {
+    using Result = runtime::Expected<bool, ProxyError>;
     char chunk[4096];
+    if (tls != nullptr) {
+      for (;;) {
+        const int n = SSL_read(tls->ssl, chunk, sizeof(chunk));
+        if (n > 0) {
+          buffer.append(chunk, static_cast<std::size_t>(n));
+          co_return Result::ok(true);
+        }
+        const int err = SSL_get_error(tls->ssl, n);
+        if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
+          const bool timed_out = co_await runtime::ReadyAwaitable{
+              fd, static_cast<short>(err == SSL_ERROR_WANT_READ ? POLLIN : POLLOUT), deadline};
+          if (timed_out) {
+            ProxyError error;
+            error.kind = ProxyError::Kind::Timeout;
+            co_return Result::fail(error);
+          }
+          continue;
+        }
+        if (err == SSL_ERROR_ZERO_RETURN) {
+          co_return Result::ok(false);
+        }
+        co_return Result::fail(RequestFailed("TLS read failed"));
+      }
+    }
     auto got = co_await runtime::read_once(fd, chunk, sizeof(chunk), deadline);
     if (!got.has_value()) {
       if (got.error().timed_out) {
@@ -389,6 +503,12 @@ runtime::Task<runtime::Expected<int, ProxyError>> Connect(
  * @brief Fetches one URL once (no redirects).
  * @return Status + (body on success, location on redirect).
  */
+void CloseFetchFd(int fd, const std::shared_ptr<TlsChannel>& channel) {
+  if (!channel) {
+    ::close(fd);
+  }
+}
+
 runtime::Task<runtime::Expected<FetchResult, ProxyError>> FetchOnce(
     const UrlParts& parts, std::size_t max_bytes, runtime::TimePoint deadline) {
   using Result = runtime::Expected<FetchResult, ProxyError>;
@@ -397,6 +517,15 @@ runtime::Task<runtime::Expected<FetchResult, ProxyError>> FetchOnce(
     co_return Result::fail(connected.error());
   }
   const int fd = connected.value();
+  std::shared_ptr<TlsChannel> channel;
+  if (parts.scheme == "https") {
+    auto opened = co_await OpenTlsChannel(fd, parts, deadline);
+    if (!opened.has_value()) {
+      CloseFetchFd(fd, channel);
+      co_return Result::fail(opened.error());
+    }
+    channel = opened.value();
+  }
   const std::string port =
       parts.port_str.empty() ? DefaultPort(parts.scheme) : parts.port_str;
   const std::string host_header = (port == DefaultPort(parts.scheme))
@@ -406,21 +535,45 @@ runtime::Task<runtime::Expected<FetchResult, ProxyError>> FetchOnce(
   request += "Host: " + host_header + "\r\n";
   request += "Accept-Encoding: identity\r\n";
   request += "Connection: close\r\n\r\n";
-  auto sent =
-      co_await runtime::write_all(fd, request.data(), request.size(), deadline);
-  if (!sent.has_value()) {
-    ::close(fd);
-    if (sent.error().timed_out) {
-      ProxyError error;
-      error.kind = ProxyError::Kind::Timeout;
-      co_return Result::fail(error);
+  if (channel != nullptr) {
+    std::size_t sent_total = 0;
+    while (sent_total < request.size()) {
+      const int n = SSL_write(channel->ssl, request.data() + sent_total,
+                             static_cast<int>(request.size() - sent_total));
+      if (n > 0) {
+        sent_total += static_cast<std::size_t>(n);
+        continue;
+      }
+      const int err = SSL_get_error(channel->ssl, n);
+      if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
+        const bool timed_out = co_await runtime::ReadyAwaitable{
+            fd, static_cast<short>(err == SSL_ERROR_WANT_READ ? POLLIN : POLLOUT), deadline};
+        if (timed_out) {
+          ProxyError error;
+          error.kind = ProxyError::Kind::Timeout;
+          co_return Result::fail(error);
+        }
+        continue;
+      }
+      co_return Result::fail(RequestFailed("TLS write failed"));
     }
-    co_return Result::fail(RequestFailed(std::strerror(sent.error().err)));
+  } else {
+    auto sent =
+        co_await runtime::write_all(fd, request.data(), request.size(), deadline);
+    if (!sent.has_value()) {
+      CloseFetchFd(fd, channel);
+      if (sent.error().timed_out) {
+        ProxyError error;
+        error.kind = ProxyError::Kind::Timeout;
+        co_return Result::fail(error);
+      }
+      co_return Result::fail(RequestFailed(std::strerror(sent.error().err)));
+    }
   }
-  FetchReader reader{fd, deadline, ""};
+  FetchReader reader{fd, deadline, "", channel};
   auto header_end = co_await reader.find_headers();
   if (!header_end.has_value()) {
-    ::close(fd);
+    CloseFetchFd(fd, channel);
     co_return Result::fail(header_end.error());
   }
   const std::string head = reader.buffer.substr(0, header_end.value());
@@ -432,7 +585,7 @@ runtime::Task<runtime::Expected<FetchResult, ProxyError>> FetchOnce(
   const std::size_t sp2 =
       sp1 == std::string::npos ? std::string::npos : status_line.find(' ', sp1 + 1);
   if (sp1 == std::string::npos) {
-    ::close(fd);
+    CloseFetchFd(fd, channel);
     co_return Result::fail(RequestFailed("malformed upstream status line"));
   }
   const std::string code_text = status_line.substr(
@@ -441,7 +594,7 @@ runtime::Task<runtime::Expected<FetchResult, ProxyError>> FetchOnce(
   try {
     status = std::stoi(code_text);
   } catch (...) {
-    ::close(fd);
+    CloseFetchFd(fd, channel);
     co_return Result::fail(RequestFailed("malformed upstream status line"));
   }
   FetchResult result;
@@ -473,7 +626,7 @@ runtime::Task<runtime::Expected<FetchResult, ProxyError>> FetchOnce(
             try {
               content_length = std::stoull(value);
             } catch (...) {
-              ::close(fd);
+              CloseFetchFd(fd, channel);
               co_return Result::fail(
                   RequestFailed("invalid Content-Length header"));
             }
@@ -490,7 +643,7 @@ runtime::Task<runtime::Expected<FetchResult, ProxyError>> FetchOnce(
     at = next + 2;
   }
   if (status < 200 || status >= 300) {
-    ::close(fd);
+    CloseFetchFd(fd, channel);
     co_return Result::ok(result);
   }
   // Read the body, enforcing max_bytes incrementally.
@@ -506,7 +659,7 @@ runtime::Task<runtime::Expected<FetchResult, ProxyError>> FetchOnce(
     for (;;) {
       auto size_line = co_await reader.read_line();
       if (!size_line.has_value()) {
-        ::close(fd);
+        CloseFetchFd(fd, channel);
         co_return Result::fail(size_line.error());
       }
       const std::string& raw = size_line.value();
@@ -515,7 +668,7 @@ runtime::Task<runtime::Expected<FetchResult, ProxyError>> FetchOnce(
       std::uint64_t chunk_size = 0;
       if (hex.empty() || hex.find_first_not_of("0123456789abcdefABCDEF") !=
                              std::string::npos) {
-        ::close(fd);
+        CloseFetchFd(fd, channel);
         co_return Result::fail(RequestFailed("malformed chunked encoding"));
       }
       for (char c : hex) {
@@ -531,7 +684,7 @@ runtime::Task<runtime::Expected<FetchResult, ProxyError>> FetchOnce(
         for (;;) {
           auto trailer = co_await reader.read_line();
           if (!trailer.has_value()) {
-            ::close(fd);
+            CloseFetchFd(fd, channel);
             co_return Result::fail(trailer.error());
           }
           if (trailer.value().empty()) {
@@ -547,18 +700,18 @@ runtime::Task<runtime::Expected<FetchResult, ProxyError>> FetchOnce(
         if (reader.buffer.size() < wanted) {
           auto more = co_await reader.fill();
           if (!more.has_value()) {
-            ::close(fd);
+            CloseFetchFd(fd, channel);
             co_return Result::fail(more.error());
           }
           if (!more.value()) {
-            ::close(fd);
+            CloseFetchFd(fd, channel);
             co_return Result::fail(RequestFailed(
                 "connection closed before response body completed"));
           }
           continue;
         }
         if (!feed(reader.buffer.data(), wanted)) {
-          ::close(fd);
+          CloseFetchFd(fd, channel);
           ProxyError error;
           error.kind = ProxyError::Kind::Oversize;
           co_return Result::fail(error);
@@ -571,11 +724,11 @@ runtime::Task<runtime::Expected<FetchResult, ProxyError>> FetchOnce(
       while (reader.buffer.size() < 2) {
         auto more = co_await reader.fill();
         if (!more.has_value()) {
-          ::close(fd);
+          CloseFetchFd(fd, channel);
           co_return Result::fail(more.error());
         }
         if (!more.value()) {
-          ::close(fd);
+          CloseFetchFd(fd, channel);
           co_return Result::fail(RequestFailed(
               "connection closed before response body completed"));
         }
@@ -590,11 +743,11 @@ runtime::Task<runtime::Expected<FetchResult, ProxyError>> FetchOnce(
       if (reader.buffer.empty()) {
         auto more = co_await reader.fill();
         if (!more.has_value()) {
-          ::close(fd);
+          CloseFetchFd(fd, channel);
           co_return Result::fail(more.error());
         }
         if (!more.value()) {
-          ::close(fd);
+          CloseFetchFd(fd, channel);
           co_return Result::fail(RequestFailed(
               "connection closed before response body completed"));
         }
@@ -602,7 +755,7 @@ runtime::Task<runtime::Expected<FetchResult, ProxyError>> FetchOnce(
       }
       const std::size_t take = std::min(wanted, reader.buffer.size());
       if (!feed(reader.buffer.data(), take)) {
-        ::close(fd);
+        CloseFetchFd(fd, channel);
         ProxyError error;
         error.kind = ProxyError::Kind::Oversize;
         co_return Result::fail(error);
@@ -614,7 +767,7 @@ runtime::Task<runtime::Expected<FetchResult, ProxyError>> FetchOnce(
     for (;;) {
       if (!reader.buffer.empty()) {
         if (!feed(reader.buffer.data(), reader.buffer.size())) {
-          ::close(fd);
+          CloseFetchFd(fd, channel);
           ProxyError error;
           error.kind = ProxyError::Kind::Oversize;
           co_return Result::fail(error);
@@ -623,7 +776,7 @@ runtime::Task<runtime::Expected<FetchResult, ProxyError>> FetchOnce(
       }
       auto more = co_await reader.fill();
       if (!more.has_value()) {
-        ::close(fd);
+        CloseFetchFd(fd, channel);
         co_return Result::fail(more.error());
       }
       if (!more.value()) {
@@ -632,7 +785,7 @@ runtime::Task<runtime::Expected<FetchResult, ProxyError>> FetchOnce(
     }
   }
   result.body = std::move(body);
-  ::close(fd);
+  CloseFetchFd(fd, channel);
   co_return Result::ok(result);
 }
 
@@ -729,11 +882,6 @@ runtime::Task<runtime::Expected<std::vector<std::uint8_t>, ProxyError>> fetch(
   UrlParts current = *parts;
   int previous = 0;
   for (;;) {
-    if (current.scheme == "https") {
-      co_return Result::fail(RequestFailed(
-          "https upstreams require TLS, which this dependency-free build "
-          "does not bundle"));
-    }
     auto outcome = co_await FetchOnce(current, max_bytes, deadline);
     if (!outcome.has_value()) {
       co_return Result::fail(outcome.error());
