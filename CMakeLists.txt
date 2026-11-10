@@ -33,9 +33,19 @@ target_link_libraries(ronfire PRIVATE ronfire_lib)
 enable_testing()
 find_package(GTest REQUIRED)
 find_package(OpenSSL REQUIRED)
-add_executable(ronfire_tests tests/test_main.cpp)
+find_package(Threads REQUIRED)
+add_executable(ronfire_tests
+  tests/test_runtime.cpp
+  tests/test_cli.cpp
+  tests/test_http.cpp
+  tests/test_static.cpp
+  tests/test_transport.cpp
+  tests/test_plugins.cpp
+  tests/test_proxy.cpp
+  tests/test_util.h)
 target_link_libraries(ronfire_tests PRIVATE ronfire_lib GTest::gtest GTest::gtest_main)
-add_test(NAME ronfire_tests COMMAND ronfire_tests)
+include(GoogleTest)
+gtest_discover_tests(ronfire_tests)
 add_test(NAME ronfire_smoke
          COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/smoke.sh
                  $<TARGET_FILE:ronfire>)
