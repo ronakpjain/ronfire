@@ -11,7 +11,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y libssl-dev
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev libgtest-dev
       - name: Build
         run: |
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -31,23 +31,5 @@ jobs:
             `ironic06/ronfire:${{ github.ref_name }}` on Docker Hub.
           files: ronfire-linux-amd64
 
-  docker:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      - name: Compute version (strip leading v)
-        id: version
-        run: echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKER_HUB_USERNAME }}
-          password: ${{ secrets.DOCKER_HUB_TOKEN }}
-      - name: Build and push
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          platforms: linux/amd64
-          push: true
-          tags: ironic06/ronfire:${{ steps.version.outputs.version }}
-          labels: org.opencontainers.image.version=${{ steps.version.outputs.version }}
+  # Docker images are built and pushed from the deployment host (VPS), not CI,
+  # so no registry credentials are needed in this workflow.
