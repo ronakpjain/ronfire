@@ -337,20 +337,21 @@ TEST(Http, RangesAndHead) {
                 .value());
   EXPECT_EQ(ranged.status, "HTTP/1.1 206 Partial Content\r\n");
   EXPECT_EQ(ranged.body, (std::vector<std::uint8_t>{'b', 'c', 'd'}));
-  EXPECT_NE(ranged.headers.find("Content-Range: bytes 1-3/6"),
+  EXPECT_NE(ranged.headers.find("\r\nContent-Range: bytes 1-3/6"),
             std::string::npos);
 
   const auto head = finalize_response(
       base, parse_http_request("HEAD /f HTTP/1.1\r\nRange: bytes=1-3\r\n\r\n")
                 .value());
   EXPECT_TRUE(head.body.empty());
-  EXPECT_NE(head.headers.find("Content-Length: 3"), std::string::npos);
+  EXPECT_NE(head.headers.find("\r\nContent-Length: 3"), std::string::npos);
 
   const auto unsat = finalize_response(
       base, parse_http_request("GET /f HTTP/1.1\r\nRange: bytes=99-100\r\n\r\n")
                 .value());
   EXPECT_EQ(unsat.status.rfind("HTTP/1.1 416", 0), 0);
-  EXPECT_NE(unsat.headers.find("Content-Range: bytes */6"), std::string::npos);
+  EXPECT_NE(unsat.headers.find("\r\nContent-Range: bytes */6"),
+            std::string::npos);
   EXPECT_FALSE(parse_range_header("bytes=0-1,2-3").has_value());
 }
 

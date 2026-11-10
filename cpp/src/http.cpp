@@ -179,6 +179,9 @@ std::string SetHeader(const std::string& headers, const std::string& name,
     }
     joined += lines[i];
   }
+  if (!lines.empty()) {
+    joined += "\r\n";
+  }
   joined += name;
   joined += ": ";
   joined += value;

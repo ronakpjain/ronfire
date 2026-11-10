@@ -1,15 +1,30 @@
-// Binary entrypoint for the C++ ronfire Unix-socket server.
-//
-// The server modules are added incrementally; this stub establishes the process
-// conventions that every later commit keeps: ignore SIGPIPE (writes to a closed
-// socket must fail, not kill the process, matching the Rust runtime) and talk
-// only over Unix sockets, never TCP.
+/**
+ * @file main.cpp
+ * @brief Entry point for the C++ ronfire Unix-socket server.
+ *
+ * Ignores SIGPIPE (writes to a closed socket must fail, not kill the
+ * process, matching the Rust runtime) and runs the server on the event loop.
+ */
 
 #include <csignal>
-#include <iostream>
+#include <cstdio>
+#include <string>
+#include <vector>
 
-int main() {
+#include "runtime/loop.h"
+#include "server.h"
+
+int main(int argc, char** argv) {
   std::signal(SIGPIPE, SIG_IGN);
-  std::cout << "ronfire - server not yet implemented\n";
-  return 0;
+  std::vector<std::string> args;
+  for (int i = 0; i < argc; ++i) {
+    args.emplace_back(argv[i]);
+  }
+  try {
+    ronfire::runtime::block_on(ronfire::run(args));
+    return 0;
+  } catch (const std::exception& error) {
+    std::fprintf(stderr, "Error: %s\n", error.what());
+    return 1;
+  }
 }

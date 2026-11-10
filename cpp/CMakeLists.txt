@@ -18,6 +18,7 @@ add_library(ronfire_lib STATIC
   src/http.cpp
   src/runtime/loop.cpp
   src/runtime/io.cpp
+  src/server.cpp
   src/static_files.cpp
   src/transport.cpp
 )
@@ -31,3 +32,7 @@ find_package(GTest REQUIRED)
 add_executable(ronfire_tests tests/test_main.cpp)
 target_link_libraries(ronfire_tests PRIVATE ronfire_lib GTest::gtest GTest::gtest_main)
 add_test(NAME ronfire_tests COMMAND ronfire_tests)
+add_test(NAME ronfire_smoke
+         COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/smoke.sh
+                 $<TARGET_FILE:ronfire>)
+set_tests_properties(ronfire_smoke PROPERTIES TIMEOUT 30)
