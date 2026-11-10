@@ -116,6 +116,7 @@ std::optional<UrlParts> ParseUrl(const std::string& value) {
   if (target.empty()) {
     target = "/";
   }
+  parts.target = target;
   return parts;
 }
 

@@ -397,6 +397,14 @@ TEST(Http, StrictParsing) {
   EXPECT_EQ(ok.value().path, "/a/b");
   EXPECT_EQ(ok.value().header("host"),
             std::optional<std::string>("example"));
+  // Lowercasing must not confuse same-length header names: a 17-char
+  // X-Forwarded-Proto must not match Transfer-Encoding.
+  const auto forwarded = parse_http_request(
+      "GET / HTTP/1.1\r\nX-Forwarded-Proto: http\r\nAccept-Encoding: gzip\r\n\r\n");
+  ASSERT_TRUE(forwarded.has_value());
+  EXPECT_FALSE(forwarded.value().header("transfer-encoding").has_value());
+  EXPECT_EQ(forwarded.value().header("x-forwarded-proto"),
+            std::optional<std::string>("http"));
   ExpectRejected("GET /../secret HTTP/1.1\r\n\r\n");  // traversal
   ExpectRejected("GET /x HTTP/2\r\n\r\n");            // unknown version
   ExpectRejected("GET /x HTTP/1.1\r\nContent-Length: 0\r\n\r\n");
@@ -554,7 +562,8 @@ struct UpstreamServer {
 };
 
 Task<void> ServeMany(int listener, std::vector<std::string> responses,
-                     std::atomic<int>* accepted) {
+                     std::atomic<int>* accepted,
+                     std::atomic<int>* good_paths = nullptr) {
   for (const auto& response : responses) {
     auto connection = co_await ronfire::accept_once(listener, std::nullopt);
     if (!connection.has_value()) {
@@ -571,6 +580,10 @@ Task<void> ServeMany(int listener, std::vector<std::string> responses,
         break;
       }
       discarded.append(buffer, static_cast<std::size_t>(got.value()));
+    }
+    // Count well-formed targets so a broken fetch (empty path) fails loudly.
+    if (good_paths != nullptr && discarded.rfind("GET /", 0) == 0) {
+      good_paths->fetch_add(1);
     }
     co_await write_all(connection.value(), response.data(), response.size(),
                        std::nullopt);
@@ -634,6 +647,7 @@ TEST(Proxy, FactoryValidation) {
 
 TEST(Proxy, LoopbackFetchCacheAndErrors) {
   UpstreamServer server;
+  std::atomic<int> good_paths{0};
   const std::string body = "{\"ok\":true}";
   const std::string canned = "HTTP/1.1 200 OK\r\nContent-Length: " +
                              std::to_string(body.size()) +
@@ -642,7 +656,7 @@ TEST(Proxy, LoopbackFetchCacheAndErrors) {
       "http://127.0.0.1:" + std::to_string(server.port) + "/item";
   auto scenario = [&]() -> Task<std::pair<std::string, int>> {
     EventLoop::current()->spawn(
-        ServeMany(server.listener, {canned}, &server.accepted));
+        ServeMany(server.listener, {canned}, &server.accepted, &good_paths));
     auto routes = LoadProxyConfig(url, "60");
     ronfire::TtlCache cache;
     auto first = co_await ronfire::dispatch_request(
@@ -659,6 +673,7 @@ TEST(Proxy, LoopbackFetchCacheAndErrors) {
   const auto result = block_on(scenario());
   EXPECT_EQ(result.first, body);
   EXPECT_EQ(result.second, 1);
+  EXPECT_EQ(good_paths.load(), 1);
 
   // Upstream 404 without cache maps to 502.
   UpstreamServer missing;
@@ -695,6 +710,7 @@ TEST(Proxy, LoopbackFetchCacheAndErrors) {
 
 TEST(Proxy, RedirectFollowsAllowlistedHost) {
   UpstreamServer server;
+  std::atomic<int> good_paths{0};
   const std::string final_url =
       "http://127.0.0.1:" + std::to_string(server.port) + "/final";
   const std::string redirect = "HTTP/1.1 302 Found\r\nLocation: " + final_url +
@@ -702,7 +718,8 @@ TEST(Proxy, RedirectFollowsAllowlistedHost) {
   const std::string done = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nfinal";
   auto scenario = [&]() -> Task<std::string> {
     EventLoop::current()->spawn(
-        ServeMany(server.listener, {redirect, done}, &server.accepted));
+        ServeMany(server.listener, {redirect, done}, &server.accepted,
+                  &good_paths));
     auto routes = LoadProxyConfig(
         "http://127.0.0.1:" + std::to_string(server.port) + "/start", "0");
     ronfire::TtlCache cache;
@@ -713,4 +730,5 @@ TEST(Proxy, RedirectFollowsAllowlistedHost) {
   };
   EXPECT_EQ(block_on(scenario()), "final");
   EXPECT_EQ(server.accepted.load(), 2);
+  EXPECT_EQ(good_paths.load(), 2);
 }

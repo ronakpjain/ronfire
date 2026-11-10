@@ -11,7 +11,7 @@ namespace {
 
 constexpr std::string_view kTerminator = "\r\n\r\n";
 
-bool ToLowerAscii(char c) {
+char ToLowerAscii(char c) {
   return static_cast<char>((c >= 'A' && c <= 'Z') ? c + ('a' - 'A') : c);
 }
 
