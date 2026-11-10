@@ -16,6 +16,7 @@ endif()
 add_library(ronfire_lib STATIC
   src/cli.cpp
   src/http.cpp
+  src/plugins.cpp
   src/runtime/loop.cpp
   src/runtime/io.cpp
   src/server.cpp

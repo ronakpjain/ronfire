@@ -13,6 +13,7 @@
 
 #include "cli.h"
 #include "http.h"
+#include "plugins.h"
 #include "static_files.h"
 #include "transport.h"
 
@@ -60,18 +61,25 @@ runtime::Task<void> SendSimple(int fd, const std::string& status,
 /**
  * @brief Builds the response for one parsed request (before Connection).
  * @param request Parsed request.
+ * @param routes Plugin route table.
  * @param document_root Secure document root.
+ * @param cache Shared cache.
  */
-HttpResponse HandleRequest(const HttpRequest& request,
-                           const DocumentRoot& document_root) {
+runtime::Task<HttpResponse> HandleRequest(const HttpRequest& request,
+                                            RouteConfig& routes,
+                                            const DocumentRoot& document_root,
+                                            TtlCache& cache) {
   if (request.method != "GET" && request.method != "HEAD") {
     HttpResponse response;
     response.status = "HTTP/1.1 405 Method Not Allowed\r\n";
     response.headers = "Allow: GET, HEAD\r\nContent-Length: 0\r\n\r\n";
-    return response;
+    co_return response;
+  }
+  if (auto plugin = co_await dispatch_request(routes, request, cache)) {
+    co_return *plugin;
   }
   if (auto full_path = document_root.resolve(request.path)) {
-    return finalize_response(generate_response(*full_path), request);
+    co_return finalize_response(generate_response(*full_path), request);
   }
   const std::string body = "<h1>404 Not Found</h1>";
   HttpResponse response;
@@ -79,16 +87,20 @@ HttpResponse HandleRequest(const HttpRequest& request,
   response.headers = "Content-Length: " + std::to_string(body.size()) +
                      "\r\nContent-Type: text/html\r\n\r\n";
   response.body.assign(body.begin(), body.end());
-  return finalize_response(std::move(response), request);
+  co_return finalize_response(std::move(response), request);
 }
 
 /**
  * @brief Serves one connection until close or error.
  * @param fd Connection fd (closed by this task on exit).
+ * @param routes Plugin route table.
  * @param document_root Shared document root.
+ * @param cache Shared cache.
  * @param logger Shared logger.
  */
-runtime::Task<void> HandleConnection(int fd, const DocumentRoot& document_root,
+runtime::Task<void> HandleConnection(int fd, RouteConfig& routes,
+                                     const DocumentRoot& document_root,
+                                     TtlCache& cache,
                                      const AsyncLogger& logger) {
   BufferedReader reader(fd);
   for (;;) {
@@ -126,7 +138,7 @@ runtime::Task<void> HandleConnection(int fd, const DocumentRoot& document_root,
     }
     const HttpRequest parsed = *request.value();
     const bool keep_alive = parsed.keep_alive();
-    HttpResponse response = HandleRequest(parsed, document_root);
+    HttpResponse response = co_await HandleRequest(parsed, routes, document_root, cache);
     PrependConnection(response, keep_alive);
     co_await send_response(fd, response, &logger);
     if (!keep_alive) {
@@ -147,6 +159,15 @@ runtime::Task<void> run(std::vector<std::string> args) {
   const Args options = parsed.value();
   // Route loading lands with the plugin registry; today there are no routes.
   // Canonicalized config path denies itself from the document root.
+  const PluginRegistry registry = PluginRegistry::with_builtins();
+  RouteConfig routes;
+  try {
+    routes = RouteConfig::load(options.config_path, registry,
+                               !options.config_explicit);
+  } catch (const ConfigError& error) {
+    throw StartupError(error.what());
+  }
+  TtlCache cache;
   auto document_root = DocumentRoot::make(options.root_path, options.config_path);
   if (!document_root.has_value()) {
     throw StartupError(document_root.error());
@@ -165,8 +186,8 @@ runtime::Task<void> run(std::vector<std::string> args) {
       }
       throw StartupError(std::strerror(accepted.error().err));
     }
-    runtime::EventLoop::current()->spawn(
-        HandleConnection(accepted.value(), document_root.value(), logger));
+    runtime::EventLoop::current()->spawn(HandleConnection(
+        accepted.value(), routes, document_root.value(), cache, logger));
   }
   co_return;
 }
