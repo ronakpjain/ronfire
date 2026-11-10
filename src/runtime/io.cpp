@@ -22,16 +22,20 @@ void set_nonblocking(int fd) {
 Task<Expected<ssize_t>> read_once(int fd, char* buffer, std::size_t capacity,
                                   std::optional<TimePoint> deadline) {
   for (;;) {
-    const bool timed_out = co_await ReadyAwaitable{fd, POLLIN, deadline};
-    if (timed_out) {
-      co_return Expected<ssize_t>::fail(IoError{0, true});
-    }
+    // Try first: data is usually already buffered, avoiding a poll cycle.
     const ssize_t n = ::read(fd, buffer, capacity);
     if (n >= 0) {
       co_return Expected<ssize_t>::ok(n);
     }
     const int err = errno;
-    if (err == EINTR || err == EAGAIN || err == EWOULDBLOCK) {
+    if (err == EINTR) {
+      continue;
+    }
+    if (err == EAGAIN || err == EWOULDBLOCK) {
+      const bool timed_out = co_await ReadyAwaitable{fd, POLLIN, deadline};
+      if (timed_out) {
+        co_return Expected<ssize_t>::fail(IoError{0, true});
+      }
       continue;
     }
     co_return Expected<ssize_t>::fail(IoError{err, false});

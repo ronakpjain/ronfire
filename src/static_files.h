@@ -4,6 +4,7 @@
 
 #include <optional>
 #include <string>
+#include <unordered_map>
 
 #include "http.h"
 #include "runtime/io.h"
@@ -29,12 +30,18 @@ class DocumentRoot {
    * @brief Resolves a path with friendly fallbacks.
    * @param path Query-free request path.
    * @return Canonical file inside the root, or nullopt when denied/missing.
+   *
+   * Positive resolutions are cached: a miss always re-resolves, so new
+   * files appear immediately, while repeated hits skip canonicalization.
    */
   std::optional<std::string> resolve(const std::string& path) const;
 
  private:
   std::string canonical_root_;
   std::optional<std::string> denied_;
+  mutable std::unordered_map<std::string, std::string> cache_;
+  /** @brief Full resolution (no caching); used by resolve(). */
+  std::optional<std::string> ResolveOnce(const std::string& path) const;
 };
 
 /**

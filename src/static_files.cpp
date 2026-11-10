@@ -8,6 +8,7 @@
 
 #include <cerrno>
 #include <cstdlib>
+#include <unordered_map>
 #include <utility>
 
 #include "transport.h"
@@ -48,6 +49,33 @@ std::string Join(const std::string& root, const std::string& suffix) {
 bool IsRegularFile(const std::string& path) {
   struct stat info {};
   return ::stat(path.c_str(), &info) == 0 && S_ISREG(info.st_mode);
+}
+
+struct CachedResponse {
+  HttpResponse response;
+  timespec mtime{};
+  off_t size = 0;
+};
+
+timespec MtimeOf(const struct stat& info) {
+#if defined(__APPLE__)
+  return timespec{info.st_mtime, info.st_mtimensec};
+#else
+  return info.st_mtim;
+#endif
+}
+
+// Single-threaded process: one cache for the whole server. Responses are
+// reused while mtime+size match; a changed file is re-read on its next hit.
+std::unordered_map<std::string, CachedResponse>& ResponseCache() {
+  static std::unordered_map<std::string, CachedResponse> cache;
+  return cache;
+}
+
+bool CacheValid(const CachedResponse& entry, const struct stat& info) {
+  const timespec mtime = MtimeOf(info);
+  return entry.size == info.st_size && entry.mtime.tv_sec == mtime.tv_sec &&
+         entry.mtime.tv_nsec == mtime.tv_nsec;
 }
 
 }  // namespace
@@ -98,6 +126,20 @@ runtime::Expected<DocumentRoot, std::string> DocumentRoot::make(
 }
 
 std::optional<std::string> DocumentRoot::resolve(const std::string& path) const {
+  {
+    const auto cached = cache_.find(path);
+    if (cached != cache_.end()) {
+      return cached->second;
+    }
+  }
+  const std::optional<std::string> resolved = ResolveOnce(path);
+  if (resolved.has_value()) {
+    cache_.emplace(path, *resolved);
+  }
+  return resolved;
+}
+
+std::optional<std::string> DocumentRoot::ResolveOnce(const std::string& path) const {
   std::size_t first = 0;
   while (first < path.size() && path[first] == '/') {
     ++first;
@@ -160,36 +202,49 @@ std::optional<std::string> DocumentRoot::resolve(const std::string& path) const 
 
 HttpResponse generate_response(const std::string& full_path) {
   HttpResponse response;
-  const int fd = ::open(full_path.c_str(), O_RDONLY | O_CLOEXEC);
-  if (fd < 0) {
-    response.status = "HTTP/1.1 404 Not Found\r\n";
-    const std::string body = "<h1>404 Not Found</h1>";
-    response.headers = "Content-Length: " + std::to_string(body.size()) +
-                       "\r\nContent-Type: text/html\r\n\r\n";
-    response.body.assign(body.begin(), body.end());
-    return response;
-  }
-  std::vector<std::uint8_t> contents;
-  contents.reserve(4096);
-  std::uint8_t chunk[16384];
-  while (true) {
-    const ssize_t n = ::read(fd, chunk, sizeof(chunk));
-    if (n > 0) {
-      contents.insert(contents.end(), chunk, chunk + n);
-    } else if (n == 0) {
-      break;
-    } else if (errno == EINTR) {
-      continue;
-    } else {
-      break;
+  struct stat info {};
+  if (::stat(full_path.c_str(), &info) == 0 && S_ISREG(info.st_mode)) {
+    auto& cache = ResponseCache();
+    const auto it = cache.find(full_path);
+    if (it != cache.end() && CacheValid(it->second, info)) {
+      return it->second.response;
+    }
+    const int fd = ::open(full_path.c_str(), O_RDONLY | O_CLOEXEC);
+    if (fd >= 0) {
+      std::vector<std::uint8_t> contents;
+      contents.reserve(static_cast<std::size_t>(info.st_size));
+      std::uint8_t chunk[16384];
+      while (true) {
+        const ssize_t n = ::read(fd, chunk, sizeof(chunk));
+        if (n > 0) {
+          contents.insert(contents.end(), chunk, chunk + n);
+        } else if (n == 0) {
+          break;
+        } else if (errno == EINTR) {
+          continue;
+        } else {
+          break;
+        }
+      }
+      ::close(fd);
+      response.status = "HTTP/1.1 200 OK\r\n";
+      response.headers = "Content-Length: " + std::to_string(contents.size()) +
+                         "\r\nContent-Type: " + guess_mime_type(full_path) +
+                         "\r\nAccept-Ranges: bytes\r\n\r\n";
+      response.body = contents;
+      CachedResponse entry;
+      entry.response = response;
+      entry.mtime = MtimeOf(info);
+      entry.size = info.st_size;
+      cache[full_path] = std::move(entry);
+      return response;
     }
   }
-  ::close(fd);
-  response.status = "HTTP/1.1 200 OK\r\n";
-  response.headers = "Content-Length: " + std::to_string(contents.size()) +
-                     "\r\nContent-Type: " + guess_mime_type(full_path) +
-                     "\r\nAccept-Ranges: bytes\r\n\r\n";
-  response.body = std::move(contents);
+  response.status = "HTTP/1.1 404 Not Found\r\n";
+  const std::string body = "<h1>404 Not Found</h1>";
+  response.headers = "Content-Length: " + std::to_string(body.size()) +
+                     "\r\nContent-Type: text/html\r\n\r\n";
+  response.body.assign(body.begin(), body.end());
   return response;
 }
 

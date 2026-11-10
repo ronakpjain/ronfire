@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <stdexcept>
 #include <system_error>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -66,12 +67,15 @@ void EventLoop::run_until(bool* done) {
   while (!*done) {
     sweep_finished();
 
-    std::vector<struct pollfd> fds;
+    pollfds_.clear();
+    pollfds_.reserve(waiters_.size());
     for (const auto& waiter : waiters_) {
       if (waiter.fd >= 0) {
-        fds.push_back(pollfd{waiter.fd, waiter.events, 0});
+        pollfds_.push_back(pollfd{waiter.fd, waiter.events, 0});
       }
     }
+    const struct pollfd* fds = pollfds_.data();
+    const std::size_t fds_size = pollfds_.size();
 
     int timeout_ms = -1;
     auto now = Clock::now();
@@ -91,27 +95,43 @@ void EventLoop::run_until(bool* done) {
       throw std::runtime_error("event loop deadlock: no waiters and main task incomplete");
     }
 
-    const int ready = ::poll(fds.data(), static_cast<nfds_t>(fds.size()), timeout_ms);
+    const int ready = ::poll(pollfds_.data(), static_cast<nfds_t>(pollfds_.size()), timeout_ms);
     if (ready < 0 && errno != EINTR) {
       throw std::system_error(errno, std::generic_category(), "poll");
     }
     now = Clock::now();
 
-    // Collect settled waiters first, then resume them: resuming runs arbitrary
-    // coroutine code that may register new waiters on the same fds.
-    std::vector<Waiter> settled;
-    std::vector<Waiter> pending;
-    pending.reserve(waiters_.size());
-    for (auto& waiter : waiters_) {
-      bool settle = false;
-      if (ready > 0 && waiter.fd >= 0) {
-        for (const auto& pfd : fds) {
-          if (pfd.fd == waiter.fd && (pfd.revents & (waiter.events | POLLHUP | POLLERR | POLLNVAL)) != 0) {
-            settle = true;
-            break;
-          }
+    settled_.clear();
+    pending_.clear();
+    std::vector<char> settle_mark(waiters_.size(), 0);
+    if (ready > 0) {
+      // Index waiters by fd once, then settle each ready fd in O(1).
+      std::unordered_map<int, std::size_t> by_fd;
+      by_fd.reserve(waiters_.size() * 2);
+      for (std::size_t i = 0; i < waiters_.size(); ++i) {
+        if (waiters_[i].fd >= 0) {
+          by_fd.emplace(waiters_[i].fd, i);
         }
       }
+      for (std::size_t j = 0; j < fds_size; ++j) {
+        const auto& pfd = fds[j];
+        const auto it = by_fd.find(pfd.fd);
+        if (it == by_fd.end() || pfd.revents == 0) {
+          continue;
+        }
+        Waiter& waiter = waiters_[it->second];
+        if ((pfd.revents & (waiter.events | POLLHUP | POLLERR | POLLNVAL)) != 0) {
+          settle_mark[it->second] = 1;
+        }
+      }
+    }
+    settled_.reserve(16);
+    pending_.reserve(waiters_.size());
+    auto& settled = settled_;
+    auto& pending = pending_;
+    for (std::size_t i = 0; i < waiters_.size(); ++i) {
+      auto& waiter = waiters_[i];
+      bool settle = settle_mark[i] != 0;
       if (!settle && waiter.deadline.has_value() && *waiter.deadline <= now) {
         waiter.state->timed_out = true;
         settle = true;

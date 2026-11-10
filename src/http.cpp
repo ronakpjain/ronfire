@@ -276,7 +276,7 @@ BufferedReader::read_next(std::optional<runtime::TimePoint> deadline) {
     if (buffer_.size() >= kMaxRequestHeaderBytes) {
       co_return Result::fail(RequestReadError::header_too_large());
     }
-    char chunk[4096];
+    char chunk[16384];
     auto got = co_await runtime::read_once(fd_, chunk, sizeof(chunk), deadline);
     if (!got.has_value()) {
       if (got.error().timed_out) {

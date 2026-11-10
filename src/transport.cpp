@@ -60,18 +60,21 @@ runtime::Task<runtime::Expected<int>> accept_once(
     int listener_fd, std::optional<runtime::TimePoint> deadline) {
   using Result = runtime::Expected<int>;
   for (;;) {
-    const bool timed_out =
-        co_await runtime::ReadyAwaitable{listener_fd, POLLIN, deadline};
-    if (timed_out) {
-      co_return Result::fail(runtime::IoError{0, true});
-    }
     const int fd = ::accept(listener_fd, nullptr, nullptr);
     if (fd >= 0) {
       runtime::set_nonblocking(fd);
       co_return Result::ok(fd);
     }
     const int error = errno;
-    if (error == EINTR || error == EAGAIN || error == EWOULDBLOCK) {
+    if (error == EINTR) {
+      continue;
+    }
+    if (error == EAGAIN || error == EWOULDBLOCK) {
+      const bool timed_out =
+          co_await runtime::ReadyAwaitable{listener_fd, POLLIN, deadline};
+      if (timed_out) {
+        co_return Result::fail(runtime::IoError{0, true});
+      }
       continue;
     }
     co_return Result::fail(runtime::IoError{error, false});

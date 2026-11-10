@@ -2,6 +2,8 @@
 
 #pragma once
 
+#include <poll.h>
+
 #include <chrono>
 #include <coroutine>
 #include <memory>
@@ -66,6 +68,11 @@ class EventLoop {
   std::vector<Waiter> waiters_;
   std::vector<std::unique_ptr<Task<void>>> detached_;
   std::vector<std::coroutine_handle<>> finished_;
+  // Reused loop buffers (pollfd set + settled/pending waiters); cleared
+  // every iteration so no per-cycle heap allocation happens.
+  std::vector<struct pollfd> pollfds_;
+  std::vector<Waiter> settled_;
+  std::vector<Waiter> pending_;
 };
 
 /** @brief Runs the main task to completion, returning its value. */
