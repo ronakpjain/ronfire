@@ -18,6 +18,7 @@ add_library(ronfire_lib STATIC
   src/http.cpp
   src/runtime/loop.cpp
   src/runtime/io.cpp
+  src/transport.cpp
 )
 target_include_directories(ronfire_lib PUBLIC src)
 

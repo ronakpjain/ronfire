@@ -1,3 +1,5 @@
+/** @file loop.cpp @brief Implementation. */
+
 // Poll-based event loop implementation. See loop.h for the design.
 
 #include "runtime/loop.h"

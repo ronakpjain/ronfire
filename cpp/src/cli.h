@@ -1,11 +1,4 @@
-/**
- * @file cli.h
- * @brief Command-line argument parsing for the ronfire server.
- *
- * Keeps the historical positional socket argument and the explicit --config /
- * --root paths used at startup. Syntax validation only; filesystem policy is
- * applied during startup. Error strings match the Rust implementation.
- */
+/** @file cli.h @brief CLI argument parsing. */
 
 #pragma once
 
@@ -16,9 +9,7 @@
 
 namespace ronfire {
 
-/**
- * @brief Parsed process arguments with the historical defaults.
- */
+/** @brief Parsed args with historical defaults. */
 struct Args {
   std::string socket_path = "/tmp/ronfire.sock"; ///< Unix socket to bind.
   std::string config_path = "ronfire.conf";      ///< Config file path.
@@ -26,12 +17,7 @@ struct Args {
   std::string root_path = ".";                   ///< Document root.
 };
 
-/**
- * @brief Parses process arguments.
- *
- * @param args Arguments including the program name at index 0.
- * @return The parsed args, or the exact Rust error string.
- */
+/** @brief Parses args (index 0 = program name). */
 runtime::Expected<Args, std::string> parse_args(
     const std::vector<std::string>& args);
 

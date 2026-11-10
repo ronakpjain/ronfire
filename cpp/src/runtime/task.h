@@ -1,17 +1,4 @@
-/**
- * @file task.h
- * @brief Lazy, move-only coroutine task.
- *
- * A Task is suspended on creation and only starts when awaited, spawned, or
- * resumed by the event loop. Tasks compose with co_await (a Task is itself an
- * awaitable), and an exception thrown inside any task is rethrown at the
- * awaiting co_await site or by block_on for the main task.
- *
- * Ownership: a Task owns its coroutine frame until destroy() (or the
- * destructor) runs. Detached tasks are owned by the event loop; the main task
- * passed to block_on stays owned by the caller stack, which extracts its
- * result before the frame is destroyed.
- */
+/** @file task.h @brief Lazy coroutine task (awaitable, move-only). */
 
 #pragma once
 
@@ -78,20 +65,14 @@ struct Task {
   }
   ~Task() { destroy(); }
 
-  /** @brief Returns the coroutine handle (may be null when moved-from). */
+  /** @brief Returns the handle, or null when moved-from. */
   handle_type handle() const noexcept { return handle_; }
   /** @brief Reports whether the coroutine has completed. */
   bool done() const noexcept { return handle_ != nullptr && handle_.promise().done; }
-  /** @brief Sets the one-shot completion callback stored in the promise. */
+  /** @brief Sets the one-shot completion callback. */
   void set_on_done(std::function<void()> cb) { handle_.promise().on_done = std::move(cb); }
 
-  /**
-   * @brief Returns the produced value, rethrowing any captured exception.
-   *
-   * The caller must ensure the task has completed.
-   *
-   * @return The co_return value (moved out).
-   */
+  /** @brief Returns the value, rethrowing captured exceptions. @return Value. */
   T result() {
     if (!done()) {
       throw std::logic_error("Task::result called on incomplete task");
@@ -102,7 +83,7 @@ struct Task {
     return std::move(handle_.promise().value).value();
   }
 
-  /** @brief Destroys the coroutine frame, if any. Safe to call twice. */
+  /** @brief Destroys the frame, if any. */
   void destroy() noexcept {
     if (handle_ != nullptr) {
       handle_.destroy();
@@ -190,18 +171,14 @@ struct Task<void> {
   }
   ~Task() { destroy(); }
 
-  /** @brief Returns the coroutine handle (may be null when moved-from). */
+  /** @brief Returns the handle, or null when moved-from. */
   handle_type handle() const noexcept { return handle_; }
   /** @brief Reports whether the coroutine has completed. */
   bool done() const noexcept { return handle_ != nullptr && handle_.promise().done; }
-  /** @brief Sets the one-shot completion callback stored in the promise. */
+  /** @brief Sets the one-shot completion callback. */
   void set_on_done(std::function<void()> cb) { handle_.promise().on_done = std::move(cb); }
 
-  /**
-   * @brief Rethrows any exception captured from the coroutine body.
-   *
-   * The caller must ensure the task has completed.
-   */
+  /** @brief Rethrows any captured exception. */
   void result() {
     if (!done()) {
       throw std::logic_error("Task::result called on incomplete task");
@@ -211,7 +188,7 @@ struct Task<void> {
     }
   }
 
-  /** @brief Destroys the coroutine frame, if any. Safe to call twice. */
+  /** @brief Destroys the frame, if any. */
   void destroy() noexcept {
     if (handle_ != nullptr) {
       handle_.destroy();

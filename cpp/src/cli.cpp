@@ -1,3 +1,5 @@
+/** @file cli.cpp @brief Implementation. */
+
 // CLI parsing implementation. See cli.h for semantics.
 
 #include "cli.h"

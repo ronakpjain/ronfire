@@ -1,9 +1,4 @@
-/**
- * @file http.cpp
- * @brief Strict HTTP parsing, framing, range handling, finalization.
- *
- * Implements http.h. See also the module documentation there.
- */
+/** @file http.cpp @brief HTTP implementation (see http.h). */
 
 #include "http.h"
 

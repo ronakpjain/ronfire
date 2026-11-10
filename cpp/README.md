@@ -1,29 +1,13 @@
 # ronfire (C++)
 
-The C++ implementation of `ronfire`, built without third-party dependencies.
-It lives in `cpp/` while it is brought to parity with the current server, and
-is organized to mirror the module layout under `../src`:
-
-```text
-src/main.cpp                 entrypoint
-src/runtime/                 hand-written coroutine event loop (no libuv/asio)
-src/cli.*                    CLI argument parsing
-src/http.*                   strict HTTP parsing, framing, ranges, finalization
-src/static_files.*           secure document root and static responses
-src/transport.*              Unix socket creation, writes, logging
-src/server.*                 startup and connection-task composition
-src/plugins.*                compiled plugin registry, config, dispatch, cache
-src/plugins/proxy.*          fixed-target proxy plugin
-```
-
-No third-party dependencies in the server: only the C++ standard library and
-POSIX sockets. Tests use a system GoogleTest (test-only, never linked into
-the server). Public headers are Doxygen-documented (`///` and `@param`/`@return`
-where a contract matters).
-Build with CMake:
+C++ implementation of `ronfire`. No third-party deps in the server (C++20 + POSIX only).
 
 ```bash
 cmake -S cpp -B cpp/build
 cmake --build cpp/build
 ctest --test-dir cpp/build
 ```
+
+Layout: `src/main.cpp`, `src/runtime/` (coroutine event loop), `src/cli.*`,
+`src/http.*`, `src/static_files.*`, `src/transport.*`, `src/server.*`,
+`src/plugins.*`, `src/plugins/proxy.*`. Tests use system GoogleTest (test-only).

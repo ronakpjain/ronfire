@@ -1,17 +1,4 @@
-/**
- * @file loop.h
- * @brief Single-threaded event loop built on poll(2).
- *
- * The loop drives every coroutine in the process: readiness waiters settle
- * when a fd becomes ready, deadline waiters settle when a steady-clock
- * deadline passes, and detached tasks spawned via spawn() are owned and
- * reaped here. Because everything runs on one thread, no locks are needed and
- * resumption never races.
- *
- * Current-loop access: block_on() installs its loop as the thread-local
- * current loop before starting the main task; IO awaitables register with
- * current(). A process runs one loop at a time.
- */
+/** @file loop.h @brief Single-threaded poll(2) event loop. */
 
 #pragma once
 
@@ -27,22 +14,11 @@
 
 namespace ronfire::runtime {
 
-/**
- * @brief Steady-clock time point used for all deadlines.
- */
+/** @brief Steady clock / time point for deadlines. */
 using Clock = std::chrono::steady_clock;
-
-/**
- * @brief Steady-clock time point used for all deadlines.
- */
 using TimePoint = Clock::time_point;
 
-/**
- * @brief Shared mutable state for one waiter.
- *
- * The awaitable and the loop hold the same state so the loop can report a
- * deadline expiry to the coroutine after resuming it.
- */
+/** @brief Shared waiter state (deadline flag) between loop and awaitable. */
 struct WaiterState {
   bool timed_out = false;
 };
@@ -56,51 +32,23 @@ class EventLoop {
   EventLoop(const EventLoop&) = delete;
   EventLoop& operator=(const EventLoop&) = delete;
 
-  /**
-   * @brief Takes ownership of a coroutine and starts it immediately.
-   *
-   * The task runs until its first suspension and its frame is destroyed once
-   * it completes. Exceptions escaping a detached task are reported to stderr
-   * at reaping time.
-   *
-   * @param task The coroutine to run (moved in).
-   */
+  /** @brief Runs a coroutine to completion, owning its frame. */
+  /** @param task Coroutine to run. */
+
   void spawn(Task<void> task);
 
-  /**
-   * @brief Registers a readiness/deadline waiter for a suspended coroutine.
-   *
-   * @param fd File descriptor to watch, or -1 for timer-only waits.
-   * @param events poll() events (POLLIN/POLLOUT), or 0 for timer-only waits.
-   * @param handle The suspended coroutine to resume.
-   * @param deadline Absolute deadline, or std::nullopt for no deadline.
-   * @param state Shared state the loop marks on deadline expiry.
-   */
+  /** @brief Registers a waiter for a suspended coroutine. */
   void add_waiter(int fd, short events, std::coroutine_handle<> handle,
                   std::optional<TimePoint> deadline,
                   std::shared_ptr<WaiterState> state);
 
-  /**
-   * @brief Runs until *done becomes true.
-   *
-   * The caller keeps the flag alive across the call (block_on owns it on the
-   * stack). May throw std::runtime_error on deadlock and std::system_error
-   * when poll(2) fails.
-   *
-   * @param done Pointer to the caller-owned completion flag.
-   */
+  /** @brief Runs until *done is true. @param done Caller-owned flag. */
   void run_until(bool* done);
 
-  /**
-   * @brief Returns the thread-local current loop, or nullptr outside block_on.
-   * @return The current loop.
-   */
+  /** @brief Returns the thread-local current loop, or nullptr. */
   static EventLoop* current() noexcept;
 
-  /**
-   * @brief Installs (or clears) the thread-local current loop.
-   * @param loop The loop to install, or nullptr to clear.
-   */
+  /** @brief Installs or clears the current loop. */
   static void set_current(EventLoop* loop) noexcept;
 
  private:
@@ -112,7 +60,7 @@ class EventLoop {
     std::shared_ptr<WaiterState> state;
   };
 
-  /** @brief Destroys frames of detached tasks that have completed. */
+  /** @brief Destroys finished detached frames. */
   void sweep_finished();
 
   std::vector<Waiter> waiters_;
@@ -120,15 +68,7 @@ class EventLoop {
   std::vector<std::coroutine_handle<>> finished_;
 };
 
-/**
- * @brief Starts the loop, runs main until it completes, returns its result.
- *
- * Rethrows any exception the main task let escape.
- *
- * @tparam T The main task's value type.
- * @param task The main coroutine (moved in).
- * @return The task's value.
- */
+/** @brief Runs the main task to completion, returning its value. */
 template <typename T>
 T block_on(Task<T> task) {
   EventLoop loop;

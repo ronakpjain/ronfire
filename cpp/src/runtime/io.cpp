@@ -1,3 +1,5 @@
+/** @file io.cpp @brief Implementation. */
+
 // IO helper implementations. See io.h for semantics.
 
 #include "runtime/io.h"
