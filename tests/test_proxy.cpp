@@ -196,3 +196,86 @@ TEST(Proxy, RedirectFollowsAllowlistedHost) {
   EXPECT_EQ(server.accepted.load(), 2);
   EXPECT_EQ(good_paths.load(), 2);
 }
+
+TEST(Proxy, OversizeBecomesBadGateway) {
+  UpstreamServer server;
+  auto scenario = [&]() -> Task<bool> {
+    EventLoop::current()->spawn(ServeMany(
+        server.listener,
+        {"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello"},
+        &server.accepted));
+    const std::string url =
+        "http://127.0.0.1:" + std::to_string(server.port) + "/x";
+    const std::string contents = "[plugin.proxy.one]\n"
+                                 "route = /api/item\n"
+                                 "url = " +
+                                 url +
+                                 "\n"
+                                 "content_type = text/plain\n"
+                                 "cache_seconds = 0\n"
+                                 "timeout_seconds = 5\n"
+                                 "max_bytes = 3\n";
+    auto routes = ronfire::RouteConfig::parse(contents);
+    ronfire::TtlCache cache;
+    auto response = co_await ronfire::dispatch_request(
+        routes, parse_http_request("GET /api/item HTTP/1.1\r\n\r\n").value(),
+        cache);
+    co_return response.has_value() &&
+              response->status.rfind("HTTP/1.1 502", 0) == 0;
+  };
+  EXPECT_TRUE(block_on(scenario()));
+}
+
+TEST(Proxy, StaleServedWhenUpstreamFails) {
+  UpstreamServer server;
+  auto scenario = [&]() -> Task<bool> {
+    EventLoop::current()->spawn(ServeMany(
+        server.listener,
+        {"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n"},
+        &server.accepted));
+    auto routes = LoadProxyConfig(
+        "http://127.0.0.1:" + std::to_string(server.port) + "/gone", "60");
+    ronfire::TtlCache cache;
+    cache.put("/api/item", {'s', 't', 'a', 'l', 'e'}, std::chrono::seconds(0));
+    auto response = co_await ronfire::dispatch_request(
+        routes, parse_http_request("GET /api/item HTTP/1.1\r\n\r\n").value(),
+        cache);
+    co_return response.has_value() &&
+              response->status.rfind("HTTP/1.1 200", 0) == 0 &&
+              std::string(response->body.begin(), response->body.end()) == "stale";
+  };
+  EXPECT_TRUE(block_on(scenario()));
+}
+
+TEST(Proxy, DisallowedRedirectHostBecomesBadGateway) {
+  UpstreamServer server;
+  auto scenario = [&]() -> Task<bool> {
+    const std::string final_url =
+        "http://evil.invalid/final";
+    EventLoop::current()->spawn(ServeMany(
+        server.listener,
+        {"HTTP/1.1 302 Found\r\nLocation: " + final_url +
+             "\r\nContent-Length: 0\r\n\r\n"},
+        &server.accepted));
+    const std::string url =
+        "http://127.0.0.1:" + std::to_string(server.port) + "/start";
+    const std::string contents = "[plugin.proxy.one]\n"
+                                 "route = /api/item\n"
+                                 "url = " +
+                                 url +
+                                 "\n"
+                                 "content_type = text/plain\n"
+                                 "redirect_hosts = allowed.invalid\n"
+                                 "cache_seconds = 0\n"
+                                 "timeout_seconds = 5\n"
+                                 "max_bytes = 1048576\n";
+    auto routes = ronfire::RouteConfig::parse(contents);
+    ronfire::TtlCache cache;
+    auto response = co_await ronfire::dispatch_request(
+        routes, parse_http_request("GET /api/item HTTP/1.1\r\n\r\n").value(),
+        cache);
+    co_return response.has_value() &&
+              response->status.rfind("HTTP/1.1 502", 0) == 0;
+  };
+  EXPECT_TRUE(block_on(scenario()));
+}

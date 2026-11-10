@@ -66,7 +66,23 @@ TEST(Http, RangesAndHead) {
   EXPECT_EQ(unsat.status.rfind("HTTP/1.1 416", 0), 0);
   EXPECT_NE(unsat.headers.find("\r\nContent-Range: bytes */6"),
             std::string::npos);
+  const auto suffix = finalize_response(
+      base, parse_http_request("GET /f HTTP/1.1\r\nRange: bytes=-3\r\n\r\n")
+                .value());
+  EXPECT_EQ(suffix.status, "HTTP/1.1 206 Partial Content\r\n");
+  EXPECT_EQ((suffix.body == std::vector<std::uint8_t>{'d', 'e', 'f'}), true);
+  const auto open = finalize_response(
+      base, parse_http_request("GET /f HTTP/1.1\r\nRange: bytes=4-\r\n\r\n")
+                .value());
+  EXPECT_EQ((open.body == std::vector<std::uint8_t>{'e', 'f'}), true);
   EXPECT_FALSE(parse_range_header("bytes=0-1,2-3").has_value());
+  const auto ctrl = parse_http_request(std::string("GET / HTTP/1.1\r\nX: a") +
+                                       '\x01' + "b\r\n\r\n");
+  EXPECT_FALSE(ctrl.has_value());
+  std::string not_utf8 = "GET / HTTP/1.1\r\n";
+  not_utf8 += '\xff';
+  not_utf8 += "\r\n\r\n";
+  EXPECT_FALSE(parse_http_request(not_utf8).has_value());
 }
 
 TEST(Http, Framing) {

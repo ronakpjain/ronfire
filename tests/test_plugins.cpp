@@ -92,3 +92,15 @@ TEST(Plugins, TtlCacheFreshAndStale) {
   EXPECT_TRUE(cache.stale("/r").has_value());
 }
 
+
+TEST(Plugins, MissingConfigPolicy) {
+  ronfire::PluginRegistry registry;
+  registry.register_plugin("test", std::make_shared<TestFactory>());
+  std::string missing =
+      (std::filesystem::temp_directory_path() / "ronfire-missing-xxxx.conf")
+          .string();
+  auto allowed = ronfire::RouteConfig::load(missing, registry, true);
+  EXPECT_EQ(allowed.route_count(), 0);
+  EXPECT_THROW(ronfire::RouteConfig::load(missing, registry, false),
+               ronfire::ConfigError);
+}
