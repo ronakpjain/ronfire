@@ -4,6 +4,7 @@
 
 #include <poll.h>
 #include <sys/socket.h>
+#include <sys/uio.h>
 #include <sys/un.h>
 #include <unistd.h>
 
@@ -87,26 +88,54 @@ runtime::Task<runtime::Expected<bool>> send_response(int fd,
       std::fprintf(stderr, "%s\n", message.c_str());
     }
   };
-  auto fail = [report](const runtime::IoError& error) -> Result {
-    report(std::string("Failed to write response: ") +
-           std::strerror(error.err));
-    return Result::fail(error);
-  };
-  auto first = co_await runtime::write_all(
-      fd, response.status.data(), response.status.size(), std::nullopt);
-  if (!first.has_value()) {
-    co_return fail(first.error());
-  }
-  auto second = co_await runtime::write_all(
-      fd, response.headers.data(), response.headers.size(), std::nullopt);
-  if (!second.has_value()) {
-    co_return fail(second.error());
-  }
-  const std::string body(response.body.begin(), response.body.end());
-  auto third = co_await runtime::write_all(fd, body.data(), body.size(),
-                                           std::nullopt);
-  if (!third.has_value()) {
-    co_return fail(third.error());
+  // One writev per attempt sends status, headers, and body together.
+  std::size_t done[3] = {0, 0, 0};
+  const std::size_t totals[3] = {response.status.size(),
+                                 response.headers.size(),
+                                 response.body.size()};
+  const void* bases[3] = {response.status.data(), response.headers.data(),
+                          response.body.data()};
+  while (done[0] < totals[0] || done[1] < totals[1] || done[2] < totals[2]) {
+    struct iovec parts[3];
+    int which[3];
+    int count = 0;
+    for (int k = 0; k < 3; ++k) {
+      if (done[k] < totals[k]) {
+        parts[count].iov_base = const_cast<char*>(
+            static_cast<const char*>(bases[k]) + done[k]);
+        parts[count].iov_len = totals[k] - done[k];
+        which[count] = k;
+        ++count;
+      }
+    }
+    const ssize_t sent = ::writev(fd, parts, count);
+    if (sent > 0) {
+      std::size_t left = static_cast<std::size_t>(sent);
+      for (int i = 0; i < count; ++i) {
+        const std::size_t chunk = parts[i].iov_len;
+        if (left < chunk) {
+          done[which[i]] += left;
+          break;
+        }
+        done[which[i]] += chunk;
+        left -= chunk;
+      }
+      continue;
+    }
+    const int error = errno;
+    if (error == EINTR) {
+      continue;
+    }
+    if (error == EAGAIN || error == EWOULDBLOCK) {
+      const bool timed_out =
+          co_await runtime::ReadyAwaitable{fd, POLLOUT, std::nullopt};
+      if (timed_out) {
+        co_return Result::fail(runtime::IoError{0, true});
+      }
+      continue;
+    }
+    report(std::string("Failed to write response: ") + std::strerror(error));
+    co_return Result::fail(runtime::IoError{error, false});
   }
   co_return Result::ok(true);
 }

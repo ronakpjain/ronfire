@@ -2,10 +2,12 @@
 
 #include "static_files.h"
 
+#include <fcntl.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
+#include <cerrno>
 #include <cstdlib>
-#include <fstream>
 #include <utility>
 
 #include "transport.h"
@@ -158,8 +160,8 @@ std::optional<std::string> DocumentRoot::resolve(const std::string& path) const 
 
 HttpResponse generate_response(const std::string& full_path) {
   HttpResponse response;
-  std::ifstream file(full_path, std::ios::binary);
-  if (!file) {
+  const int fd = ::open(full_path.c_str(), O_RDONLY | O_CLOEXEC);
+  if (fd < 0) {
     response.status = "HTTP/1.1 404 Not Found\r\n";
     const std::string body = "<h1>404 Not Found</h1>";
     response.headers = "Content-Length: " + std::to_string(body.size()) +
@@ -167,8 +169,22 @@ HttpResponse generate_response(const std::string& full_path) {
     response.body.assign(body.begin(), body.end());
     return response;
   }
-  std::vector<std::uint8_t> contents((std::istreambuf_iterator<char>(file)),
-                                     std::istreambuf_iterator<char>());
+  std::vector<std::uint8_t> contents;
+  contents.reserve(4096);
+  std::uint8_t chunk[16384];
+  while (true) {
+    const ssize_t n = ::read(fd, chunk, sizeof(chunk));
+    if (n > 0) {
+      contents.insert(contents.end(), chunk, chunk + n);
+    } else if (n == 0) {
+      break;
+    } else if (errno == EINTR) {
+      continue;
+    } else {
+      break;
+    }
+  }
+  ::close(fd);
   response.status = "HTTP/1.1 200 OK\r\n";
   response.headers = "Content-Length: " + std::to_string(contents.size()) +
                      "\r\nContent-Type: " + guess_mime_type(full_path) +
