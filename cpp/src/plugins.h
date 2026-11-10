@@ -5,6 +5,7 @@
 #include <chrono>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <utility>
@@ -43,7 +44,7 @@ struct PluginRequest {
 };
 
 /**
- * @brief In-memory TTL cache shared by plugin handlers.
+ * @brief In-memory TTL cache shared by plugin handlers. Thread-safe.
  *
  * Successful bodies are keyed by route; expired entries stay available as
  * stale data when upstream requests fail.
@@ -72,6 +73,7 @@ class TtlCache {
     std::vector<std::uint8_t> body;
     runtime::TimePoint expires_at;
   };
+  mutable std::mutex mutex_;
   std::map<std::string, Entry> entries_;
 };
 

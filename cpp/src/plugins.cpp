@@ -57,6 +57,7 @@ struct RawSection {
 
 std::optional<std::vector<std::uint8_t>> TtlCache::fresh(
     const std::string& key) const {
+  std::lock_guard<std::mutex> guard(mutex_);
   const auto it = entries_.find(key);
   if (it == entries_.end() || runtime::Clock::now() >= it->second.expires_at) {
     return std::nullopt;
@@ -66,6 +67,7 @@ std::optional<std::vector<std::uint8_t>> TtlCache::fresh(
 
 std::optional<std::vector<std::uint8_t>> TtlCache::stale(
     const std::string& key) const {
+  std::lock_guard<std::mutex> guard(mutex_);
   const auto it = entries_.find(key);
   if (it == entries_.end()) {
     return std::nullopt;
@@ -75,6 +77,7 @@ std::optional<std::vector<std::uint8_t>> TtlCache::stale(
 
 void TtlCache::put(std::string key, std::vector<std::uint8_t> body,
                    std::chrono::seconds ttl) {
+  std::lock_guard<std::mutex> guard(mutex_);
   entries_[std::move(key)] =
       Entry{std::move(body), runtime::Clock::now() + ttl};
 }

@@ -17,6 +17,7 @@
 namespace ronfire {
 
 void AsyncLogger::log(const std::string& message) const {
+  std::lock_guard<std::mutex> guard(mutex_);
   const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(
                            std::chrono::system_clock::now().time_since_epoch())
                            .count();

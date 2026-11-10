@@ -3,6 +3,7 @@
 #pragma once
 
 #include <cstddef>
+#include <mutex>
 #include <optional>
 #include <string>
 
@@ -16,8 +17,11 @@ namespace ronfire {
 /** @brief Timestamped stderr logger. */
 class AsyncLogger {
  public:
-  /** @brief Writes one timestamped line to stderr. */
+  /** @brief Writes one timestamped line to stderr. Thread-safe. */
   void log(const std::string& message) const;
+
+ private:
+  mutable std::mutex mutex_;
 };
 
 /** @brief Binds a Unix listener, replacing any existing socket file. */
