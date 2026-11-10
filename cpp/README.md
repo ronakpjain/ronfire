@@ -1,8 +1,8 @@
-# ronfire (C++ rewrite)
+# ronfire (C++)
 
-A dependency-free C++20 rewrite of the Rust `ronfire` Unix-socket HTTP server.
-This tree is built incrementally, one commit per feature, mirroring the Rust
-module layout under `../src`:
+The C++ implementation of `ronfire`, built without third-party dependencies.
+It lives in `cpp/` while it is brought to parity with the current server, and
+is organized to mirror the module layout under `../src`:
 
 ```text
 src/main.cpp                 entrypoint

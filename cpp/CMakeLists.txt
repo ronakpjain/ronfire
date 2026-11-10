@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(ronfire_cpp VERSION 0.1.0 LANGUAGES CXX)
+project(ronfire VERSION 0.1.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -13,8 +13,16 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
   add_compile_options(-Wall -Wextra -Wpedantic -Werror)
 endif()
 
+add_library(ronfire_lib STATIC
+  src/runtime/loop.cpp
+  src/runtime/io.cpp
+)
+target_include_directories(ronfire_lib PUBLIC src)
+
 add_executable(ronfire src/main.cpp)
+target_link_libraries(ronfire PRIVATE ronfire_lib)
 
 enable_testing()
 add_executable(ronfire_tests tests/test_main.cpp)
+target_link_libraries(ronfire_tests PRIVATE ronfire_lib)
 add_test(NAME ronfire_tests COMMAND ronfire_tests)

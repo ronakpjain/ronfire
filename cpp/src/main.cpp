@@ -10,6 +10,6 @@
 
 int main() {
   std::signal(SIGPIPE, SIG_IGN);
-  std::cout << "ronfire (C++ rewrite) - server not yet implemented\n";
+  std::cout << "ronfire - server not yet implemented\n";
   return 0;
 }
