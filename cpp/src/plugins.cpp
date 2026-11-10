@@ -7,6 +7,8 @@
 #include <set>
 #include <utility>
 
+#include "plugins/proxy.h"
+
 namespace ronfire {
 namespace {
 
@@ -100,7 +102,7 @@ std::optional<std::shared_ptr<PluginFactory>> PluginRegistry::factory(
 
 PluginRegistry PluginRegistry::with_builtins() {
   PluginRegistry registry;
-  // NOTE: the proxy factory lands in plugins/proxy.cpp and registers here.
+  registry.register_plugin("proxy", std::make_shared<proxy::ProxyFactory>());
   return registry;
 }
 
