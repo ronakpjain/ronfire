@@ -1,17 +1,27 @@
-// Minimal test harness: no external test framework (dependency-free build).
-// Each CHECK records a failure with source location; main exits non-zero if any
-// check failed so ctest reports the suite.
+/**
+ * @file test_main.cpp
+ * @brief Contract tests for the C++ server (GoogleTest).
+ *
+ * Only important behaviour is covered: coroutine composition and error
+ * propagation, single-threaded fd interleaving under backpressure, deadline
+ * handling, CLI parity, strict HTTP rejection, keep-alive, range/HEAD
+ * finalization, and request framing (pipelining, caps, timeout, EOF).
+ *
+ * GoogleTest is a test-only dependency; the server binary links only the
+ * C++ standard library and POSIX.
+ */
 
 #include <sys/socket.h>
 #include <unistd.h>
 
 #include <chrono>
 #include <cstddef>
-#include <iostream>
 #include <string>
-#include <utility>
+
+#include <gtest/gtest.h>
 
 #include "cli.h"
+#include "http.h"
 #include "runtime/io.h"
 #include "runtime/loop.h"
 #include "runtime/task.h"
@@ -19,219 +29,299 @@
 namespace {
 
 using namespace ronfire::runtime;
+using ronfire::finalize_response;
+using ronfire::parse_http_request;
+using ronfire::parse_range_header;
 using ronfire::parse_args;
 
-int g_checks = 0;
-int g_failures = 0;
-
-void Report(bool ok, const char* expr, const char* file, int line) {
-  ++g_checks;
-  if (!ok) {
-    ++g_failures;
-    std::cerr << file << ':' << line << ": CHECK(" << expr << ") failed\n";
+/**
+ * @brief RAII non-blocking Unix socketpair for tests.
+ */
+class SocketPair {
+ public:
+  SocketPair() {
+    int fds[2] = {-1, -1};
+    EXPECT_TRUE(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0)
+        << "socketpair failed";
+    set_nonblocking(fds[0]);
+    set_nonblocking(fds[1]);
+    fds_[0] = fds[0];
+    fds_[1] = fds[1];
   }
-}
-
-}  // namespace
-
-#define CHECK(cond) Report(static_cast<bool>(cond), #cond, __FILE__, __LINE__)
-
-namespace {
-
-// --- runtime: Task values, nesting, and exceptions ---------------------------
-
-Task<int> AddOne(int x) { co_return x + 1; }
-
-Task<int> DoubleAddOne(int x) { co_return co_await AddOne(x) * 2; }
-
-Task<int> Throwing() {
-  throw std::runtime_error("boom");
-  co_return 0;
-}
-
-void TestTaskValues() {
-  CHECK(block_on(AddOne(41)) == 42);
-  CHECK(block_on(DoubleAddOne(41)) == 84);
-}
-
-void TestTaskExceptions() {
-  bool caught = false;
-  try {
-    block_on(Throwing());
-  } catch (const std::runtime_error&) {
-    caught = true;
+  ~SocketPair() {
+    if (fds_[0] >= 0) ::close(fds_[0]);
+    if (fds_[1] >= 0) ::close(fds_[1]);
   }
-  CHECK(caught);
-}
+  SocketPair(const SocketPair&) = delete;
+  SocketPair& operator=(const SocketPair&) = delete;
 
-// --- runtime: spawn, sleep, and fd IO over socketpair ------------------------
+  /** @brief First end. */
+  int first() const { return fds_[0]; }
+  /** @brief Second end. */
+  int second() const { return fds_[1]; }
 
-std::pair<int, int> MakeSocketpair() {
-  int fds[2] = {-1, -1};
-  CHECK(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
-  set_nonblocking(fds[0]);
-  set_nonblocking(fds[1]);
-  return {fds[0], fds[1]};
-}
+ private:
+  int fds_[2];
+};
 
-void ClosePair(std::pair<int, int> p) {
-  ::close(p.first);
-  ::close(p.second);
-}
-
-// Main-after-spawn: the spawned writer must make progress while main awaits.
-Task<void> SpawnWriter(int peer) {
-  const char msg[] = "hello";
-  co_await write_all(peer, msg, 5, std::nullopt);
+/**
+ * @brief Writes a fixed message from the peer end.
+ * @param peer Peer fd.
+ * @param text Message to write.
+ */
+Task<void> Writer(const char* text, int peer) {
+  const std::string payload = text;
+  co_await write_all(peer, payload.data(), payload.size(), std::nullopt);
   co_return;
 }
 
-Task<std::string> EchoThroughPair() {
-  auto ends = MakeSocketpair();
-  const int mine = ends.first;
-  const int peer = ends.second;
-
-  EventLoop* loop = EventLoop::current();
-  CHECK(loop != nullptr);
-  loop->spawn(SpawnWriter(peer));
-
-  char buffer[16] = {};
-  auto got = co_await read_once(mine, buffer, sizeof(buffer), std::nullopt);
-  CHECK(got.has_value());
-  if (got.has_value()) {
-    CHECK(got.value() == 5);
-  }
-  ClosePair(ends);
-  co_return std::string(buffer, 5);
-}
-
-void TestSpawnAndFdIo() {
-  CHECK(block_on(EchoThroughPair()) == "hello");
-}
-
-Task<bool> ReadWithDeadline(int fd, TimePoint deadline) {
-  char buffer[8];
-  auto got = co_await read_once(fd, buffer, sizeof(buffer), deadline);
-  co_return !got.has_value() && got.error().timed_out;
-}
-
-void TestReadTimeout() {
-  auto ends = MakeSocketpair();
-  const auto start = Clock::now();
-  const bool timed_out =
-      block_on(ReadWithDeadline(ends.first, start + std::chrono::milliseconds(50)));
-  const auto elapsed = Clock::now() - start;
-  CHECK(timed_out);
-  CHECK(elapsed >= std::chrono::milliseconds(50));
-  CHECK(elapsed < std::chrono::seconds(5));
-  ClosePair(ends);
-}
-
-Task<void> WriteThenReadAll(int mine, std::string payload) {
-  // Writer runs until all bytes are consumed; the reader below drains them,
-  // so this exercises EAGAIN handling on both sides with a payload larger
-  // than a default socket buffer.
-  const char* data = payload.data();
-  co_await write_all(mine, data, payload.size(), std::nullopt);
-  co_return;
-}
-
-Task<int> DrainAll(int peer, std::size_t expected) {
+/**
+ * @brief Drains exactly expected bytes.
+ * @param reader_fd Reader fd.
+ * @param expected Byte count to drain.
+ * @return Byte count drained.
+ */
+Task<std::size_t> Drain(int reader_fd, std::size_t expected) {
   std::size_t seen = 0;
   char buffer[4096];
   while (seen < expected) {
-    auto got = co_await read_once(peer, buffer, sizeof(buffer), std::nullopt);
-    CHECK(got.has_value());
-    if (!got.has_value()) {
-      break;
-    }
+    auto got = co_await read_once(reader_fd, buffer, sizeof(buffer), std::nullopt);
+    if (!got.has_value()) break;
     seen += static_cast<std::size_t>(got.value());
   }
-  co_return static_cast<int>(seen);
+  co_return seen;
 }
 
-Task<int> Transfer(int mine, int peer, std::string payload) {
-  EventLoop* loop = EventLoop::current();
-  CHECK(loop != nullptr);
-  loop->spawn(WriteThenReadAll(mine, payload));
-  co_return co_await DrainAll(peer, payload.size());
+/**
+ * @brief Writer half of the large-transfer test.
+ * @param writer_fd Writer fd.
+ * @param payload Payload to write.
+ */
+Task<void> BigWriter(int writer_fd, std::string payload) {
+  co_await write_all(writer_fd, payload.data(), payload.size(), std::nullopt);
+  co_return;
 }
 
-void TestLargeTransfer() {
-  auto ends = MakeSocketpair();
-  const std::string payload(100'000, 'x');
-  // Spawned writer blocks until the main task drains; both must interleave.
-  CHECK(block_on(Transfer(ends.first, ends.second, payload)) ==
-        static_cast<int>(payload.size()));
-  ClosePair(ends);
-}
-
-Task<std::chrono::steady_clock::duration> SleepFor(std::chrono::steady_clock::duration d) {
-  const auto start = Clock::now();
-  co_await sleep(d);
-  co_return Clock::now() - start;
-}
-
-void TestSleep() {
-  const auto elapsed = block_on(SleepFor(std::chrono::milliseconds(30)));
-  CHECK(elapsed >= std::chrono::milliseconds(30));
-  CHECK(elapsed < std::chrono::seconds(5));
-}
-
-// --- cli: parity with the Rust parser --------------------------------------
-
-void TestCliParity() {
-  const auto full = parse_args(
-      {"ronfire", "/tmp/test.sock", "--config", "/etc/ronfire.conf", "--root", "/srv/site"});
-  CHECK(full.has_value());
-  if (full.has_value()) {
-    CHECK(full.value().socket_path == "/tmp/test.sock");
-    CHECK(full.value().config_path == "/etc/ronfire.conf");
-    CHECK(full.value().config_explicit);
-    CHECK(full.value().root_path == "/srv/site");
-  }
-  const auto defaults = parse_args({"ronfire"});
-  CHECK(defaults.has_value());
-  if (defaults.has_value()) {
-    CHECK(defaults.value().socket_path == "/tmp/ronfire.sock");
-    CHECK(defaults.value().config_path == "ronfire.conf");
-    CHECK(!defaults.value().config_explicit);
-    CHECK(defaults.value().root_path == ".");
-  }
-  const auto equals = parse_args({"ronfire", "--config=/x.conf", "--root=/srv"});
-  CHECK(equals.has_value() && equals.value().config_path == "/x.conf" &&
-        equals.value().root_path == "/srv");
-}
-
-void TestCliErrors() {
-  CHECK(!parse_args({"ronfire", "--config"}).has_value());
-  CHECK(!parse_args({"ronfire", "--config="}).has_value());
-  CHECK(!parse_args({"ronfire", "--root"}).has_value());
-  CHECK(!parse_args({"ronfire", "--root="}).has_value());
-  CHECK(!parse_args({"ronfire", "--bogus"}).has_value());
-  CHECK(!parse_args({"ronfire", "-"}).has_value());
-  CHECK(!parse_args({"ronfire", "/a.sock", "/b.sock"}).has_value());
-  const auto unknown = parse_args({"ronfire", "--bogus"});
-  CHECK(!unknown.has_value() && unknown.error() == "unknown option: --bogus");
+/**
+ * @brief Asserts that a request string is rejected.
+ * @param request Raw request bytes.
+ */
+void ExpectRejected(const std::string& request) {
+  EXPECT_FALSE(parse_http_request(request).has_value()) << request;
 }
 
 }  // namespace
 
-int main() {
-  CHECK(1 + 1 == 2);
-  TestTaskValues();
-  TestTaskExceptions();
-  TestSpawnAndFdIo();
-  TestReadTimeout();
-  TestLargeTransfer();
-  TestSleep();
-  TestCliParity();
-  TestCliErrors();
+// --- runtime -----------------------------------------------------------------
 
-  if (g_failures != 0) {
-    std::cerr << g_failures << " of " << g_checks << " checks failed\n";
-    return 1;
-  }
-  std::cout << "all " << g_checks << " checks passed\n";
-  return 0;
+TEST(Runtime, TaskValuesAndNesting) {
+  EXPECT_EQ(block_on([]() -> Task<int> { co_return 42; }()), 42);
+  EXPECT_EQ(block_on([]() -> Task<int> {
+    auto inner = []() -> Task<int> { co_return 21; }();
+    co_return co_await inner * 2;
+  }()), 42);
+}
+
+TEST(Runtime, TaskExceptionsPropagate) {
+  EXPECT_THROW(block_on([]() -> Task<int> {
+    throw std::runtime_error("boom");
+    co_return 0;
+  }()), std::runtime_error);
+}
+
+TEST(Runtime, SpawnInterleaving) {
+  SocketPair pair;
+  auto scenario = [&]() -> Task<std::string> {
+    EventLoop::current()->spawn(Writer("hello", pair.second()));
+    std::string out;
+    char buffer[16];
+    while (out.size() < 5) {
+      auto got =
+          co_await read_once(pair.first(), buffer, sizeof(buffer), std::nullopt);
+      EXPECT_TRUE(got.has_value());
+      if (!got.has_value()) break;
+      out.append(buffer, static_cast<std::size_t>(got.value()));
+    }
+    co_return out;
+  };
+  EXPECT_EQ(block_on(scenario()), "hello");
+}
+
+TEST(Runtime, BackpressureLargeTransfer) {
+  SocketPair pair;
+  const std::string payload(100'000, 'x');
+  auto scenario = [&]() -> Task<std::size_t> {
+    EventLoop::current()->spawn(BigWriter(pair.second(), payload));
+    co_return co_await Drain(pair.first(), payload.size());
+  };
+  EXPECT_EQ(block_on(scenario()), payload.size());
+}
+
+TEST(Runtime, DeadlineAndSleep) {
+  SocketPair pair;
+  const auto start = Clock::now();
+  const bool timed_out = block_on([&]() -> Task<bool> {
+    char buffer[8];
+    auto got = co_await read_once(pair.first(), buffer, sizeof(buffer),
+                                  start + std::chrono::milliseconds(50));
+    co_return !got.has_value() && got.error().timed_out;
+  }());
+  EXPECT_TRUE(timed_out);
+  EXPECT_GE(Clock::now() - start, std::chrono::milliseconds(50));
+  EXPECT_LT(Clock::now() - start, std::chrono::seconds(5));
+  EXPECT_NO_THROW(block_on(sleep(std::chrono::milliseconds(10))));
+}
+
+// --- cli ---------------------------------------------------------------------
+
+TEST(Cli, DefaultsAndFlags) {
+  const auto defaults = parse_args({"ronfire"});
+  ASSERT_TRUE(defaults.has_value());
+  EXPECT_EQ(defaults.value().socket_path, "/tmp/ronfire.sock");
+  EXPECT_EQ(defaults.value().config_path, "ronfire.conf");
+  EXPECT_FALSE(defaults.value().config_explicit);
+  EXPECT_EQ(defaults.value().root_path, ".");
+  const auto full = parse_args(
+      {"ronfire", "/tmp/a.sock", "--config=/x.conf", "--root", "/srv"});
+  ASSERT_TRUE(full.has_value());
+  EXPECT_EQ(full.value().socket_path, "/tmp/a.sock");
+  EXPECT_EQ(full.value().config_path, "/x.conf");
+  EXPECT_TRUE(full.value().config_explicit);
+  EXPECT_EQ(full.value().root_path, "/srv");
+}
+
+TEST(Cli, Errors) {
+  const auto unknown = parse_args({"ronfire", "--bogus"});
+  ASSERT_FALSE(unknown.has_value());
+  EXPECT_EQ(unknown.error(), "unknown option: --bogus");
+  EXPECT_FALSE(parse_args({"ronfire", "--config"}).has_value());
+  EXPECT_FALSE(parse_args({"ronfire", "--config="}).has_value());
+  EXPECT_FALSE(parse_args({"ronfire", "/a", "/b"}).has_value());
+}
+
+// --- http --------------------------------------------------------------------
+
+TEST(Http, StrictParsing) {
+  const auto ok =
+      parse_http_request("GET /a/b?x=1 HTTP/1.1\r\nHost: example\r\n\r\n");
+  ASSERT_TRUE(ok.has_value());
+  EXPECT_EQ(ok.value().path, "/a/b");
+  EXPECT_EQ(ok.value().header("host"),
+            std::optional<std::string>("example"));
+  ExpectRejected("GET /../secret HTTP/1.1\r\n\r\n");  // traversal
+  ExpectRejected("GET /x HTTP/2\r\n\r\n");            // unknown version
+  ExpectRejected("GET /x HTTP/1.1\r\nContent-Length: 0\r\n\r\n");
+  ExpectRejected("GET /x HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n");
+  ExpectRejected("GET /x HTTP/1.1\r\nNoColon\r\n\r\n");
+  ExpectRejected("GET /x HTTP/1.1");  // missing CRLFCRLF
+}
+
+TEST(Http, KeepAlive) {
+  const auto both = parse_http_request(
+      "GET / HTTP/1.1\r\nConnection: keep-alive\r\nConnection: close\r\n\r\n");
+  ASSERT_TRUE(both.has_value());
+  EXPECT_FALSE(both.value().keep_alive());
+  const auto v11 = parse_http_request("GET / HTTP/1.1\r\n\r\n");
+  ASSERT_TRUE(v11.has_value());
+  EXPECT_TRUE(v11.value().keep_alive());
+  const auto v10 = parse_http_request("GET / HTTP/1.0\r\n\r\n");
+  ASSERT_TRUE(v10.has_value());
+  EXPECT_FALSE(v10.value().keep_alive());
+}
+
+TEST(Http, RangesAndHead) {
+  ronfire::HttpResponse base;
+  base.status = "HTTP/1.1 200 OK\r\n";
+  base.headers = "Content-Length: 6\r\nContent-Type: application/pdf\r\n\r\n";
+  base.body = {'a', 'b', 'c', 'd', 'e', 'f'};
+
+  const auto ranged = finalize_response(
+      base, parse_http_request("GET /f HTTP/1.1\r\nRange: bytes=1-3\r\n\r\n")
+                .value());
+  EXPECT_EQ(ranged.status, "HTTP/1.1 206 Partial Content\r\n");
+  EXPECT_EQ(ranged.body, (std::vector<std::uint8_t>{'b', 'c', 'd'}));
+  EXPECT_NE(ranged.headers.find("Content-Range: bytes 1-3/6"),
+            std::string::npos);
+
+  const auto head = finalize_response(
+      base, parse_http_request("HEAD /f HTTP/1.1\r\nRange: bytes=1-3\r\n\r\n")
+                .value());
+  EXPECT_TRUE(head.body.empty());
+  EXPECT_NE(head.headers.find("Content-Length: 3"), std::string::npos);
+
+  const auto unsat = finalize_response(
+      base, parse_http_request("GET /f HTTP/1.1\r\nRange: bytes=99-100\r\n\r\n")
+                .value());
+  EXPECT_EQ(unsat.status.rfind("HTTP/1.1 416", 0), 0);
+  EXPECT_NE(unsat.headers.find("Content-Range: bytes */6"), std::string::npos);
+  EXPECT_FALSE(parse_range_header("bytes=0-1,2-3").has_value());
+}
+
+TEST(Http, Framing) {
+  SocketPair pair;
+  // Split writes + pipelining: two requests must parse in order.
+  auto scenario = [&]() -> Task<bool> {
+    const std::string wire =
+        "GET /one HTTP/1.1\r\nHost: ex"
+        "ample\r\n\r\nGET /two HTTP/1.1\r\n\r\n";
+    auto written = co_await write_all(pair.second(), wire.data(), wire.size(),
+                                      std::nullopt);
+    if (!written.has_value()) co_return false;
+    ronfire::BufferedReader reader(pair.first());
+    auto first = co_await reader.read_next(std::nullopt);
+    if (!(first.has_value() && first.value().has_value() &&
+          first.value()->path == "/one")) {
+      co_return false;
+    }
+    auto second = co_await reader.read_next(std::nullopt);
+    co_return second.has_value() && second.value().has_value() &&
+              second.value()->path == "/two";
+  };
+  EXPECT_TRUE(block_on(scenario()));
+
+  // Header cap: oversized block without a terminator.
+  SocketPair capped;
+  auto capped_scenario = [&]() -> Task<bool> {
+    const std::string payload(ronfire::kMaxRequestHeaderBytes, 'a');
+    EventLoop::current()->spawn(BigWriter(capped.second(), payload));
+    ronfire::BufferedReader reader(capped.first());
+    auto got = co_await reader.read_next(std::nullopt);
+    co_return !got.has_value() &&
+              got.error().kind ==
+                  ronfire::RequestReadError::Kind::HeaderTooLarge;
+  };
+  EXPECT_TRUE(block_on(capped_scenario()));
+
+  // Idle deadline.
+  SocketPair idle;
+  auto idle_scenario = [&]() -> Task<bool> {
+    ronfire::BufferedReader reader(idle.first());
+    auto got = co_await reader.read_next(
+        Clock::now() + std::chrono::milliseconds(50));
+    co_return !got.has_value() &&
+              got.error().kind == ronfire::RequestReadError::Kind::TimedOut;
+  };
+  EXPECT_TRUE(block_on(idle_scenario()));
+
+  // Clean EOF vs partial EOF.
+  SocketPair eof;
+  ::shutdown(eof.second(), SHUT_WR);
+  EXPECT_TRUE(block_on([&]() -> Task<bool> {
+    ronfire::BufferedReader reader(eof.first());
+    auto got = co_await reader.read_next(std::nullopt);
+    co_return got.has_value() && !got.value().has_value();
+  }()));
+  SocketPair partial;
+  auto partial_scenario = [&]() -> Task<bool> {
+    const std::string wire = "GET /one HTTP/1.1\r\n";
+    auto written = co_await write_all(partial.second(), wire.data(), wire.size(),
+                                      std::nullopt);
+    if (!written.has_value()) co_return false;
+    ::shutdown(partial.second(), SHUT_WR);
+    ronfire::BufferedReader reader(partial.first());
+    auto got = co_await reader.read_next(std::nullopt);
+    co_return !got.has_value() &&
+              got.error().kind == ronfire::RequestReadError::Kind::Malformed;
+  };
+  EXPECT_TRUE(block_on(partial_scenario()));
 }

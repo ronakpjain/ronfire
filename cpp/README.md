@@ -16,7 +16,10 @@ src/plugins.*                compiled plugin registry, config, dispatch, cache
 src/plugins/proxy.*          fixed-target proxy plugin
 ```
 
-No third-party dependencies: only the C++ standard library and POSIX sockets.
+No third-party dependencies in the server: only the C++ standard library and
+POSIX sockets. Tests use a system GoogleTest (test-only, never linked into
+the server). Public headers are Doxygen-documented (`///` and `@param`/`@return`
+where a contract matters).
 Build with CMake:
 
 ```bash

@@ -15,6 +15,7 @@ endif()
 
 add_library(ronfire_lib STATIC
   src/cli.cpp
+  src/http.cpp
   src/runtime/loop.cpp
   src/runtime/io.cpp
 )
@@ -24,6 +25,7 @@ add_executable(ronfire src/main.cpp)
 target_link_libraries(ronfire PRIVATE ronfire_lib)
 
 enable_testing()
+find_package(GTest REQUIRED)
 add_executable(ronfire_tests tests/test_main.cpp)
-target_link_libraries(ronfire_tests PRIVATE ronfire_lib)
+target_link_libraries(ronfire_tests PRIVATE ronfire_lib GTest::gtest GTest::gtest_main)
 add_test(NAME ronfire_tests COMMAND ronfire_tests)
