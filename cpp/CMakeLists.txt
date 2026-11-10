@@ -14,6 +14,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
 endif()
 
 add_library(ronfire_lib STATIC
+  src/cli.cpp
   src/runtime/loop.cpp
   src/runtime/io.cpp
 )

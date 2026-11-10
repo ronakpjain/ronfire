@@ -11,6 +11,7 @@
 #include <string>
 #include <utility>
 
+#include "cli.h"
 #include "runtime/io.h"
 #include "runtime/loop.h"
 #include "runtime/task.h"
@@ -18,6 +19,7 @@
 namespace {
 
 using namespace ronfire::runtime;
+using ronfire::parse_args;
 
 int g_checks = 0;
 int g_failures = 0;
@@ -176,6 +178,43 @@ void TestSleep() {
   CHECK(elapsed < std::chrono::seconds(5));
 }
 
+// --- cli: parity with the Rust parser --------------------------------------
+
+void TestCliParity() {
+  const auto full = parse_args(
+      {"ronfire", "/tmp/test.sock", "--config", "/etc/ronfire.conf", "--root", "/srv/site"});
+  CHECK(full.has_value());
+  if (full.has_value()) {
+    CHECK(full.value().socket_path == "/tmp/test.sock");
+    CHECK(full.value().config_path == "/etc/ronfire.conf");
+    CHECK(full.value().config_explicit);
+    CHECK(full.value().root_path == "/srv/site");
+  }
+  const auto defaults = parse_args({"ronfire"});
+  CHECK(defaults.has_value());
+  if (defaults.has_value()) {
+    CHECK(defaults.value().socket_path == "/tmp/ronfire.sock");
+    CHECK(defaults.value().config_path == "ronfire.conf");
+    CHECK(!defaults.value().config_explicit);
+    CHECK(defaults.value().root_path == ".");
+  }
+  const auto equals = parse_args({"ronfire", "--config=/x.conf", "--root=/srv"});
+  CHECK(equals.has_value() && equals.value().config_path == "/x.conf" &&
+        equals.value().root_path == "/srv");
+}
+
+void TestCliErrors() {
+  CHECK(!parse_args({"ronfire", "--config"}).has_value());
+  CHECK(!parse_args({"ronfire", "--config="}).has_value());
+  CHECK(!parse_args({"ronfire", "--root"}).has_value());
+  CHECK(!parse_args({"ronfire", "--root="}).has_value());
+  CHECK(!parse_args({"ronfire", "--bogus"}).has_value());
+  CHECK(!parse_args({"ronfire", "-"}).has_value());
+  CHECK(!parse_args({"ronfire", "/a.sock", "/b.sock"}).has_value());
+  const auto unknown = parse_args({"ronfire", "--bogus"});
+  CHECK(!unknown.has_value() && unknown.error() == "unknown option: --bogus");
+}
+
 }  // namespace
 
 int main() {
@@ -186,6 +225,8 @@ int main() {
   TestReadTimeout();
   TestLargeTransfer();
   TestSleep();
+  TestCliParity();
+  TestCliErrors();
 
   if (g_failures != 0) {
     std::cerr << g_failures << " of " << g_checks << " checks failed\n";

@@ -29,8 +29,8 @@ struct IoError {
   bool timed_out = false;
 };
 
-// Minimal expected: either a value or an IoError.
-template <typename T>
+// Minimal expected: either a value or an error E (IoError by default).
+template <typename T, typename E = IoError>
 class Expected {
  public:
   static Expected ok(T value) {
@@ -38,9 +38,9 @@ class Expected {
     result.value_ = value;
     return result;
   }
-  static Expected fail(IoError error) {
+  static Expected fail(E error) {
     Expected result;
-    result.error_ = error;
+    result.error_ = std::move(error);
     return result;
   }
 
@@ -48,11 +48,11 @@ class Expected {
   const T& value() const& { return value_.value(); }
   T& value() & { return value_.value(); }
   T&& value() && { return std::move(value_).value(); }
-  IoError error() const { return error_; }
+  E error() const { return error_; }
 
  private:
   std::optional<T> value_{};
-  IoError error_{};
+  E error_{};
 };
 
 // Waits until fd has the requested readiness or the deadline passes.
