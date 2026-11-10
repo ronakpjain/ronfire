@@ -18,7 +18,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libssl-dev libgtest-dev
       - name: Install dependencies (macOS)
         if: runner.os == 'macOS'
-        run: brew install cmake gtest openssl
+        run: brew install googletest openssl
       - name: Configure
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
       - name: Build
