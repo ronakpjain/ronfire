@@ -21,7 +21,8 @@ Layout: `src/main.cpp`, `src/runtime/` (coroutine event loop), `src/cli.*`,
   `close` winning.
 - Static files under `--root` (default `.`): `/` → `index.html`,
   extensionless → `name.html` or `name/index.html`, canonical containment
-  blocks symlink escapes, `.`-paths/`app.log`/config file denied.
+  blocks symlink escapes, `.`-paths/`app.log`/config file denied. Resolved
+  paths and file responses are cached (invalidated by mtime+size).
 - Plugins: compiled-in only, strict `[plugin.NAME.INSTANCE]` INI. `proxy`
   (see below) is the only built-in.
 - Runtime: single-threaded `poll()` loop + C++20 coroutines (`src/runtime/`).
